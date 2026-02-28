@@ -1,0 +1,13 @@
+# Datos sensibles
+data/
+
+# Configuración local de Claude Code
+.claude/
+
+# Archivos de R
+.Rhistory
+.RData
+.Rproj.user/
+
+# HTML generado (opcional, puede subirse si querés compartir el reporte renderizado)
+# decisiones_de_limpieza_hasta_momento1.html
