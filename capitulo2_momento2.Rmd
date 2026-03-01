@@ -1,0 +1,419 @@
+---
+title: "Trayectorias Sociolaborales de Personas Migrantes en el AMBA"
+subtitle: "Capítulo 2 — Primer año en Argentina"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = FALSE,
+  message = FALSE,
+  warning = FALSE
+)
+```
+
+```{r preparacion, include=FALSE}
+library(tidyverse)
+library(readr)
+library(wordcloud2)
+library(tidytext)
+
+# -----------------------------------------------------------------------------
+# IMPORTACIÓN Y LIMPIEZA
+# Misma preparación que Capítulo 1. Ver decisiones documentadas allí.
+# -----------------------------------------------------------------------------
+encuesta <- read_csv(
+  "data/Trayectorias laborales vf kobo weightvec v3.csv",
+  locale = locale(encoding = "UTF-8"),
+  show_col_types = FALSE
+)
+
+encuesta_clean <- encuesta %>%
+  select(
+    -`q40_estudios/s__estudios_de_nivel_primario`,
+    -`q40_estudios/s__estudios_de_nivel_secundario`,
+    -`q40_estudios/s__estudios_de_nivel_terciario__institut`,
+    -`q40_estudios/s__estudios_universitarios__carrera_de_g`,
+    -`q40_estudios/s__estudios_de_postgrado`,
+    -`q40_estudios/s__capacitaciones_laborales_profesionale`,
+    -`q40_estudios/no__no_estudi__desde_que_llegu__a_argent`,
+    -`...1`, -`__version__`, -`_tags`, -`_index`,
+    -start, -end
+  )
+
+# Correcciones en q19_anio_arribo (ver Capítulo 1)
+encuesta_clean <- encuesta_clean %>%
+  mutate(q19_anio_arribo = case_when(
+    q19_anio_arribo == 21               ~ 2004,
+    q19_anio_arribo %in% c(18, 1918)    ~ NA_real_,
+    TRUE                                ~ q19_anio_arribo
+  ))
+
+# -----------------------------------------------------------------------------
+# FILTRO MOMENTO 2
+# Este bloque aplica solo a quienes llevan más de un año en Argentina.
+# Quienes llegaron en 2024 o 2025 se saltan el bloque y pasan al Momento 3.
+# Los casos con q19_anio_arribo == NA se excluyen por no poder verificar
+# su elegibilidad.
+# -----------------------------------------------------------------------------
+encuesta_momento2 <- encuesta_clean %>%
+  filter(q19_anio_arribo < 2024)
+
+# Stopwords para nubes de palabras
+stopwords_es <- c(
+  "de", "en", "la", "el", "los", "las", "un", "una", "y", "a", "por",
+  "con", "del", "al", "se", "su", "que", "o", "para", "pero", "como",
+  "más", "este", "esta", "esto", "entre", "hasta", "desde",
+  "trabajo", "trabajaba", "trabajé", "sector", "área", "empresa", "famili"
+)
+
+total_pesos_m2 <- sum(encuesta_momento2$weightvec)
+```
+
+# Descripción del bloque
+
+Este capítulo analiza la situación sociolaboral durante el **primer año de residencia 
+en Argentina**. El bloque fue respondido únicamente por quienes llevan más de un año 
+en el país — quienes llegaron en 2024 o 2025 pasaron directamente al Momento 3.
+
+La base de análisis para este capítulo es de **`r nrow(encuesta_momento2)` casos**.
+
+---
+
+# Documentación durante el primer año
+
+## Obtención del DNI (Q20)
+
+```{r q20}
+encuesta_momento2 %>%
+  filter(!is.na(q20_DNI_primer_anio)) %>%
+  group_by(q20_DNI_primer_anio) %>%
+  summarise(n = sum(weightvec)) %>%
+  mutate(
+    porcentaje = round(n / sum(n) * 100, 1),
+    q20_DNI_primer_anio = recode(q20_DNI_primer_anio,
+      "si"                    = "Sí",
+      "no"                    = "No",
+      "prefiero_no_responder" = "Prefiero no responder / No sé"
+    )
+  ) %>%
+  arrange(desc(porcentaje)) %>%
+  select(`Obtuvo DNI en el primer año` = q20_DNI_primer_anio, `%` = porcentaje)
+```
+
+---
+
+# Situación laboral durante el primer año
+
+## Trabajó durante el primer año (Q21)
+
+```{r q21}
+encuesta_momento2 %>%
+  filter(!is.na(q21_trabajo_primer_anio)) %>%
+  group_by(q21_trabajo_primer_anio) %>%
+  summarise(n = sum(weightvec)) %>%
+  mutate(
+    porcentaje = round(n / sum(n) * 100, 1),
+    q21_trabajo_primer_anio = recode(q21_trabajo_primer_anio,
+      "si"             = "Sí, trabajó",
+      "no_jubilado"    = "No, ya estaba jubilado/retirado",
+      "no_estudio"     = "No, solo estudió",
+      "no_desempleado" = "No, estuvo desempleado/buscando trabajo",
+      "no_ninio"       = "No, era niño/a o adolescente"
+    )
+  ) %>%
+  arrange(desc(porcentaje)) %>%
+  select(`Situación laboral primer año` = q21_trabajo_primer_anio, `%` = porcentaje)
+```
+
+## Tipo de ocupación en el primer año (Q22)
+
+*Porcentajes calculados sobre quienes trabajaron durante el primer año (Q21 = Sí).*
+
+```{r q22}
+encuesta_momento2 %>%
+  filter(q21_trabajo_primer_anio == "si") %>%
+  filter(!is.na(q22_ocupacion_primer_anio)) %>%
+  group_by(q22_ocupacion_primer_anio) %>%
+  summarise(n = sum(weightvec)) %>%
+  mutate(
+    porcentaje = round(n / sum(n) * 100, 1),
+    q22_ocupacion_primer_anio = recode(q22_ocupacion_primer_anio,
+      "salario_fijo"             = "Trabajo con salario fijo",
+      "cuenta_propia"            = "Trabajo por cuenta propia",
+      "changas"                  = "Trabajos esporádicos / changas / subempleo",
+      "trabajo_sin_remuneracion" = "Trabajo sin remuneración",
+      "otro"                     = "Otra"
+    )
+  ) %>%
+  arrange(desc(porcentaje)) %>%
+  select(`Situación ocupacional primer año` = q22_ocupacion_primer_anio, `%` = porcentaje)
+```
+
+*Nota: la categoría "Otra" (6.6%) incluye 31 respuestas en texto libre con alta 
+heterogeneidad — predominan descripciones de trabajo informal no registrado y trabajo 
+doméstico. Pendiente de reclasificación con el equipo.*
+
+## Formalidad del trabajo en el primer año (Q23)
+
+*Porcentajes calculados sobre quienes tenían salario fijo o trabajo por cuenta propia (Q22).*
+
+```{r q23}
+encuesta_momento2 %>%
+  filter(q21_trabajo_primer_anio == "si") %>%
+  filter(q22_ocupacion_primer_anio %in% c("salario_fijo", "cuenta_propia")) %>%
+  filter(!is.na(q23_formalidad_trabajo)) %>%
+  group_by(q23_formalidad_trabajo) %>%
+  summarise(n = sum(weightvec)) %>%
+  mutate(
+    porcentaje = round(n / sum(n) * 100, 1),
+    q23_formalidad_trabajo = recode(q23_formalidad_trabajo,
+      "formal"   = "Formal",
+      "informal" = "Informal"
+    )
+  ) %>%
+  arrange(desc(porcentaje)) %>%
+  select(`Formalidad del trabajo en primer año` = q23_formalidad_trabajo, `%` = porcentaje)
+```
+
+## Actividad laboral en el primer año (Q24)
+
+*Porcentajes calculados sobre quienes trabajaban por cuenta propia o realizaban 
+changas/subempleo (Q22).*
+
+```{r q24}
+encuesta_momento2 %>%
+  filter(q22_ocupacion_primer_anio %in% c("cuenta_propia", "changas")) %>%
+  filter(!is.na(q24_actividad_primer_anio)) %>%
+  group_by(q24_actividad_primer_anio) %>%
+  summarise(n = sum(weightvec)) %>%
+  mutate(
+    porcentaje = round(n / sum(n) * 100, 1),
+    q24_actividad_primer_anio = recode(q24_actividad_primer_anio,
+      "patron"             = "Patrón de un negocio (empleador)",
+      "profesional"        = "Profesional independiente",
+      "servicio_oficio"    = "Trabajo de servicio u oficio",
+      "emprendimiento"     = "Emprendimiento",
+      "venta_ambulante"    = "Venta ambulante",
+      "plataforma"         = "Trabajo en plataformas",
+      "trabajo_estacional" = "Trabajo estacional o por períodos",
+      "otro"               = "Otra"
+    )
+  ) %>%
+  arrange(desc(porcentaje)) %>%
+  select(`Actividad laboral primer año` = q24_actividad_primer_anio, `%` = porcentaje)
+```
+
+*Nota: la categoría "Otra" incluye respuestas en texto libre pendientes de 
+reclasificación con el equipo.*
+
+## Ocupación en el primer año — exploración de texto libre (Q25)
+
+La pregunta 25 solicitó una descripción en texto libre de la ocupación durante el 
+primer año. Se presenta una nube de palabras con los 50 términos más frecuentes como 
+exploración cualitativa.
+
+```{r q25, fig.align='center'}
+palabras_q25 <- encuesta_momento2 %>%
+  filter(q21_trabajo_primer_anio == "si") %>%
+  filter(!is.na(q25_ocupacion_primer_anio)) %>%
+  select(q25_ocupacion_primer_anio) %>%
+  unnest_tokens(word, q25_ocupacion_primer_anio) %>%
+  filter(!word %in% stopwords_es) %>%
+  filter(nchar(word) > 3) %>%
+  count(word, sort = TRUE)
+
+wordcloud2(palabras_q25 %>% slice_max(n, n = 50),
+           color = "random-dark",
+           backgroundColor = "white",
+           size = 0.8)
+```
+
+## Cómo obtuvo el trabajo en el primer año (Q26)
+
+*Porcentajes calculados sobre quienes trabajaron durante el primer año (Q21 = Sí).*
+
+```{r q26}
+encuesta_momento2 %>%
+  filter(q21_trabajo_primer_anio == "si") %>%
+  filter(!is.na(q26_forma_obtencion)) %>%
+  group_by(q26_forma_obtencion) %>%
+  summarise(n = sum(weightvec)) %>%
+  mutate(
+    porcentaje = round(n / sum(n) * 100, 1),
+    q26_forma_obtencion = recode(q26_forma_obtencion,
+      "vine_con_trabajo"       = "Vine con trabajo desde mi país de origen",
+      "anuncios_plataformas"   = "A través de anuncios, plataformas y redes",
+      "dejo_cv"                = "Dejé mi curriculum y me llamaron",
+      "recomendación_familiar" = "Por recomendación de conocido, compatriota o familiar",
+      "agencia_empleo"         = "A través de una oficina o agencia de empleo",
+      "otro"                   = "Otra"
+    )
+  ) %>%
+  arrange(desc(porcentaje)) %>%
+  select(`Cómo obtuvo el trabajo` = q26_forma_obtencion, `%` = porcentaje)
+```
+
+---
+
+# Remesas y vínculos transnacionales
+
+## Envío de remesas durante el primer año (Q27)
+
+```{r q27}
+encuesta_momento2 %>%
+  filter(!is.na(q27_remesas)) %>%
+  group_by(q27_remesas) %>%
+  summarise(n = sum(weightvec)) %>%
+  mutate(
+    porcentaje = round(n / sum(n) * 100, 1),
+    q27_remesas = recode(q27_remesas,
+      "regularmente"          = "Sí, regularmente",
+      "a_veces"               = "Sí, de vez en cuando",
+      "no"                    = "No",
+      "prefiero_no_responder" = "Prefiero no responder"
+    )
+  ) %>%
+  arrange(desc(porcentaje)) %>%
+  select(`Envío de remesas primer año` = q27_remesas, `%` = porcentaje)
+```
+
+---
+
+# Barreras de acceso al trabajo
+
+## Dificultades para acceder a trabajo en el primer año (Q28)
+
+*Porcentajes calculados sobre quienes trabajaron, estuvieron desempleados o solo 
+estudiaron (Q21 = Sí, no_desempleado, no_estudio).*
+
+```{r q28}
+encuesta_momento2 %>%
+  filter(q21_trabajo_primer_anio %in% c("si", "no_desempleado", "no_estudio")) %>%
+  filter(!is.na(q28_dificultades_acceso)) %>%
+  group_by(q28_dificultades_acceso) %>%
+  summarise(n = sum(weightvec)) %>%
+  mutate(
+    porcentaje = round(n / sum(n) * 100, 1),
+    q28_dificultades_acceso = recode(q28_dificultades_acceso,
+      "si"                    = "Sí",
+      "no"                    = "No",
+      "prefiero_no_responder" = "Prefiero no responder"
+    )
+  ) %>%
+  arrange(desc(porcentaje)) %>%
+  select(`Dificultades para acceder a trabajo` = q28_dificultades_acceso, `%` = porcentaje)
+```
+
+## Principal dificultad de acceso (Q29)
+
+*Porcentajes calculados sobre quienes declararon haber tenido dificultades (Q28 = Sí).*
+
+```{r q29}
+encuesta_momento2 %>%
+  filter(q28_dificultades_acceso == "si") %>%
+  filter(!is.na(q29_tipo_dificultades_primer_a)) %>%
+  group_by(q29_tipo_dificultades_primer_a) %>%
+  summarise(n = sum(weightvec)) %>%
+  mutate(
+    porcentaje = round(n / sum(n) * 100, 1),
+    q29_tipo_dificultades_primer_a = recode(q29_tipo_dificultades_primer_a,
+      "homologacion_titulos"  = "Dificultades con la homologación/reconocimiento de títulos",
+      "discriminacion"        = "Discriminación por condición de extranjero/a",
+      "falta_documentacion"   = "Falta de documentación (DNI u otros)",
+      "idioma"                = "Dificultades con el idioma",
+      "sin_experiencia"       = "Falta de experiencia previa",
+      "poca_oferta"           = "Poca oferta en el rubro buscado",
+      "no_sabia_buscar"       = "No sabía dónde buscar trabajo",
+      "prefiero_no_responder" = "Prefiero no responder",
+      "otro"                  = "Otra"
+    )
+  ) %>%
+  arrange(desc(porcentaje)) %>%
+  select(`Principal dificultad de acceso` = q29_tipo_dificultades_primer_a, `%` = porcentaje)
+```
+
+*Nota: la categoría "Otra" (6.7%, 40 respuestas en texto libre) está dominada por 
+menciones a la **edad** como barrera de acceso — patrón emergente relevante no 
+contemplado en las opciones originales del cuestionario. Pendiente de análisis 
+con el equipo.*
+
+---
+
+# Calidad del trabajo durante el primer año
+
+## Adecuación de la actividad al área de conocimiento (Q30)
+
+*Porcentajes calculados sobre quienes trabajaron durante el primer año (Q21 = Sí).*
+
+```{r q30}
+encuesta_momento2 %>%
+  filter(q21_trabajo_primer_anio == "si") %>%
+  filter(!is.na(q30_actividad_adecuada)) %>%
+  group_by(q30_actividad_adecuada) %>%
+  summarise(n = sum(weightvec)) %>%
+  mutate(
+    porcentaje = round(n / sum(n) * 100, 1),
+    q30_actividad_adecuada = recode(q30_actividad_adecuada,
+      "si"                    = "Sí",
+      "no"                    = "No",
+      "parcialmente"          = "Parcialmente",
+      "prefiero_no_responder" = "Prefiero no responder"
+    )
+  ) %>%
+  arrange(desc(porcentaje)) %>%
+  select(`Actividad adecuada a conocimientos` = q30_actividad_adecuada, `%` = porcentaje)
+```
+
+## Cobertura de necesidades básicas en el primer año (Q31)
+
+*Porcentajes calculados sobre quienes trabajaron durante el primer año (Q21 = Sí).*
+
+```{r q31}
+encuesta_momento2 %>%
+  filter(q21_trabajo_primer_anio == "si") %>%
+  filter(!is.na(q31_necesidades_basicas)) %>%
+  group_by(q31_necesidades_basicas) %>%
+  summarise(n = sum(weightvec)) %>%
+  mutate(
+    porcentaje = round(n / sum(n) * 100, 1),
+    q31_necesidades_basicas = recode(q31_necesidades_basicas,
+      "completamente"  = "Completamente",
+      "bastante_bien"  = "Bastante bien",
+      "justo"          = "Justo",
+      "insuficiente"   = "Insuficiente",
+      "muy_deficiente" = "Muy deficiente"
+    )
+  ) %>%
+  arrange(desc(porcentaje)) %>%
+  select(`Cobertura de necesidades básicas primer año` = q31_necesidades_basicas, `%` = porcentaje)
+```
+
+---
+
+# Programas sociales y ayuda estatal
+
+## Recibió ayuda o programa social durante el primer año (Q32)
+
+```{r q32}
+encuesta_momento2 %>%
+  filter(!is.na(q32_subsidios)) %>%
+  group_by(q32_subsidios) %>%
+  summarise(n = sum(weightvec)) %>%
+  mutate(
+    porcentaje = round(n / sum(n) * 100, 1),
+    q32_subsidios = recode(q32_subsidios,
+      "si"                    = "Sí",
+      "no"                    = "No",
+      "prefiero_no_responder" = "Prefiero no responder / No sé"
+    )
+  ) %>%
+  arrange(desc(porcentaje)) %>%
+  select(`Recibió ayuda o programa social` = q32_subsidios, `%` = porcentaje)
+```

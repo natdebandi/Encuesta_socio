@@ -1,0 +1,599 @@
+---
+title: "Trayectorias Sociolaborales de Personas Migrantes en el AMBA"
+subtitle: "Capítulo 1 — Perfil sociodemográfico y migratorio"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = FALSE,
+  message = FALSE,
+  warning = FALSE
+)
+```
+
+# Descripción del proyecto
+
+Esta encuesta forma parte de una investigación sobre trayectorias laborales de personas 
+migrantes en el Área Metropolitana de Buenos Aires (AMBA), radicada en la Universidad 
+de Tübingen (Alemania) en alianza con el Centro de Inteligencia Artificial 
+Interdisciplinario de la UNSAM.
+
+El cuestionario sigue un enfoque de derechos humanos e indaga sobre tres momentos 
+clave: la situación laboral en el país de origen, el primer año en Argentina y la 
+situación actual. La muestra cuenta con **1.104 casos** recolectados mediante KoboToolbox 
+y fue calibrada con pesos muestrales utilizando como marco de referencia el Censo 
+Nacional de Población, Hogares y Viviendas 2022 (INDEC). Las decisiones metodológicas 
+de limpieza y calibración se encuentran documentadas en el anexo metodológico del 
+proyecto.
+
+## Nota metodológica: uso de pesos muestrales
+
+Todos los análisis incorporan los pesos muestrales calibrados (`weightvec`) de forma 
+explícita usando `tidyverse`. En lugar de contar casos, cada estimación pondera la 
+contribución de cada encuestado mediante `sum(weightvec)`:
+
+- Para **distribuciones categóricas**: `group_by() %>% summarise(n = sum(weightvec)) %>% mutate(porcentaje = n / sum(n) * 100)`
+- Para **preguntas de selección múltiple** (columnas binarias 0/1): se multiplica cada columna por el peso y se divide por la suma total de pesos
+
+Cuando una pregunta tiene un **filtro lógico** —solo aplica a un subconjunto de 
+encuestados— se aplica `filter()` antes del `group_by()`. Los porcentajes resultantes 
+se calculan sobre la suma de pesos del subconjunto, no del total de la muestra.
+
+---
+
+```{r preparacion, include=FALSE}
+library(tidyverse)
+library(readr)
+library(wordcloud2)
+library(tidytext)
+
+# -----------------------------------------------------------------------------
+# IMPORTACIÓN
+# -----------------------------------------------------------------------------
+encuesta <- read_csv(
+  "data/Trayectorias laborales vf kobo weightvec v3.csv",
+  locale = locale(encoding = "UTF-8"),
+  show_col_types = FALSE
+)
+
+# -----------------------------------------------------------------------------
+# LIMPIEZA
+# Se eliminan las columnas de la versión anterior del formulario KoboToolbox 
+# (prefijo s__), que no contienen datos, y metadatos irrelevantes para el análisis.
+# Se conservan _uuid, _id y q0_consentimiento para trazabilidad.
+# -----------------------------------------------------------------------------
+encuesta_clean <- encuesta %>%
+  select(
+    -`q40_estudios/s__estudios_de_nivel_primario`,
+    -`q40_estudios/s__estudios_de_nivel_secundario`,
+    -`q40_estudios/s__estudios_de_nivel_terciario__institut`,
+    -`q40_estudios/s__estudios_universitarios__carrera_de_g`,
+    -`q40_estudios/s__estudios_de_postgrado`,
+    -`q40_estudios/s__capacitaciones_laborales_profesionale`,
+    -`q40_estudios/no__no_estudi__desde_que_llegu__a_argent`,
+    -`...1`, -`__version__`, -`_tags`, -`_index`,
+    -start, -end
+  )
+
+# -----------------------------------------------------------------------------
+# VARIABLES DERIVADAS
+# -----------------------------------------------------------------------------
+
+# Nivel educativo agrupado en 4 categorías.
+# Se distingue terciario de universitario/posgrado dado que corresponden a 
+# trayectorias educativas diferenciadas en el sistema argentino.
+encuesta_clean <- encuesta_clean %>%
+  mutate(
+    q7_estudios_grupo = case_when(
+      q7_estudios %in% c("sin_estudios",
+                         "primario_incompleto",
+                         "primario_completo")       ~ "Hasta primario completo",
+      q7_estudios %in% c("secundario_incompleto",
+                         "secundario_completo")     ~ "Hasta secundario completo",
+      q7_estudios %in% c("terciario_incompleto",
+                         "terciario_completo")      ~ "Hasta terciario completo",
+      q7_estudios %in% c("universitario_incompleto",
+                         "universitario_completo",
+                         "posgrado_incompleto",
+                         "posgrado_completo")       ~ "Universitario o posgrado",
+      q7_estudios == "prefiero_no_responder"        ~ "Prefiero no responder"
+    )
+  )
+
+# -----------------------------------------------------------------------------
+# CORRECCIONES EN Q12 — Año de salida del país de origen
+# Se identificaron 11 casos con valores imposibles o inverosímiles.
+# Criterio: se recupera el año usando edad, año de arribo y coherencia temporal.
+# Se convierte a NA cuando no es posible inferir con suficiente confianza.
+# -----------------------------------------------------------------------------
+encuesta_clean <- encuesta_clean %>%
+  mutate(q12_anio_salida = case_when(
+
+    # RECUPERABLES
+    # 219 → 2019: venezolano, 71 años, arribo 2019. Error tipográfico evidente.
+    q12_anio_salida == 219  ~ 2019,
+    # 2995 → 1995: colombiano, 59 años, arribo 1994. Trasposición de dígitos.
+    q12_anio_salida == 2995 ~ 1995,
+    # 28 → 2018: venezolano, 37 años, arribo 2018. Coherente.
+    q12_anio_salida == 28   ~ 2018,
+    # 210 → 2010: 44 años, arribo 2010. Error tipográfico evidente.
+    q12_anio_salida == 210  ~ 2010,
+    # 19 → 2006: paraguayo, 38 años, arribo 2006. El encuestado registró su edad
+    # al salir (19 años) en lugar del año. 2025 - 19 = 2006, coincide con arribo.
+    q12_anio_salida == 19   ~ 2006,
+    # 20 → 2006: peruano, 41 años, arribo 2006. Misma hipótesis: registró edad
+    # al salir (20 años). 2025 - 20 = 2005 ≈ 2006, coherente con arribo.
+    q12_anio_salida == 20   ~ 2006,
+    # 1949: persona de 76 años, arribo también 1949. Dentro del universo posible.
+    q12_anio_salida == 1949 ~ 1949,
+
+    # IRRECUPERABLES → NA
+    # 1: sin contexto suficiente para inferir año.
+    # 18: arribo también es 18, ambos campos corruptos.
+    # 22: hipótesis de edad al salir daría ~2003, no coincide con arribo 2009.
+    # 1918: venezolano de 64 años, año imposible.
+    q12_anio_salida %in% c(1, 18, 22, 1918) ~ NA_real_,
+
+    TRUE ~ q12_anio_salida
+  ))
+
+# -----------------------------------------------------------------------------
+# CORRECCIONES EN Q19 — Año de arribo a Argentina
+# Se identificaron 3 casos con valores problemáticos.
+# -----------------------------------------------------------------------------
+encuesta_clean <- encuesta_clean %>%
+  mutate(q19_anio_arribo = case_when(
+
+    # RECUPERABLE
+    # 21 → 2004: 41 años, salió en 2005. Hipótesis edad al llegar (2025 - 21 = 2004),
+    # coherente con q12_anio_salida = 2005.
+    q19_anio_arribo == 21 ~ 2004,
+
+    # IRRECUPERABLES → NA
+    # 18: paraguayo, 48 años, q12 también corrupto. Sin referencia para inferir.
+    # 1918: venezolano, 64 años, año imposible. q12 también corrupto.
+    q19_anio_arribo %in% c(18, 1918) ~ NA_real_,
+
+    TRUE ~ q19_anio_arribo
+  ))
+
+# -----------------------------------------------------------------------------
+# PESOS MUESTRALES
+# Los pesos (weightvec) fueron calibrados en dos etapas:
+# (1) ajuste por sexo, edad y zona dentro de cada nacionalidad;
+# (2) ajuste de la distribución marginal por nacionalidad según Censo 2022.
+# Se usan directamente en cada consulta mediante sum(weightvec).
+# -----------------------------------------------------------------------------
+total_pesos <- sum(encuesta_clean$weightvec)
+```
+
+---
+
+# Perfil sociodemográfico de la muestra
+
+Todos los resultados utilizan los pesos muestrales calibrados (`weightvec`), que corrigen 
+simultáneamente por nacionalidad, sexo, grupos de edad y zona geográfica de residencia 
+respecto a la distribución poblacional del Censo 2022.
+
+## Nacionalidad
+
+La variable `nac` corresponde a la nacionalidad recodificada según el esquema de 
+calibración. Brasil fue reclasificado en la categoría "otros" por presentar valores 
+faltantes estructurales en las variables de calibración. Las nacionalidades con menor 
+presencia (Chile, Ecuador, Italia, Senegal, Haití, República Dominicana, China, España) 
+también fueron agrupadas en "otros".
+
+```{r nacionalidad}
+encuesta_clean %>%
+  group_by(nac) %>%
+  summarise(n = sum(weightvec)) %>%
+  mutate(porcentaje = round(n / sum(n) * 100, 1)) %>%
+  arrange(desc(porcentaje)) %>%
+  select(Nacionalidad = nac, `%` = porcentaje)
+```
+
+## Sexo
+
+```{r sexo}
+encuesta_clean %>%
+  group_by(sexo) %>%
+  summarise(n = sum(weightvec)) %>%
+  mutate(porcentaje = round(n / sum(n) * 100, 1)) %>%
+  arrange(desc(porcentaje)) %>%
+  select(Sexo = sexo, `%` = porcentaje)
+```
+
+*Nota: los 7 casos con sexo "otro" fueron incorporados con peso unitario (weightvec = 1) 
+por incompatibilidad con el marco censal de referencia, que registra únicamente las 
+categorías femenino y masculino.*
+
+## Grupos de edad
+
+Los grupos etarios se mantienen en orden cronológico. El grupo 65-100 años fue 
+incorporado durante el trabajo de campo al registrarse casos fuera del rango original 
+del diseño muestral (18-64 años). Para Venezuela y Uruguay, los grupos 18-24 y 25-35 
+fueron fusionados en 18-35 durante la calibración por ausencia de casos en el tramo 18-24.
+
+```{r edad}
+encuesta_clean %>%
+  group_by(edad_agrupada) %>%
+  summarise(n = sum(weightvec)) %>%
+  mutate(porcentaje = round(n / sum(n) * 100, 1)) %>%
+  select(`Grupo etario` = edad_agrupada, `%` = porcentaje)
+```
+
+## Zona de residencia
+
+```{r zona}
+encuesta_clean %>%
+  group_by(zona) %>%
+  summarise(n = sum(weightvec)) %>%
+  mutate(porcentaje = round(n / sum(n) * 100, 1)) %>%
+  arrange(desc(porcentaje)) %>%
+  select(Zona = zona, `%` = porcentaje)
+```
+
+## Nivel educativo
+
+Se presentan dos vistas de la misma variable: la distribución detallada por categoría 
+original y una agrupación en cuatro niveles para facilitar la lectura comparativa.
+
+```{r educacion_detalle}
+encuesta_clean %>%
+  group_by(q7_estudios) %>%
+  summarise(n = sum(weightvec)) %>%
+  mutate(
+    porcentaje = round(n / sum(n) * 100, 1),
+    q7_estudios = recode(q7_estudios,
+      "sin_estudios"             = "Sin estudios",
+      "primario_incompleto"      = "Primario incompleto",
+      "primario_completo"        = "Primario completo",
+      "secundario_incompleto"    = "Secundario incompleto",
+      "secundario_completo"      = "Secundario completo",
+      "terciario_incompleto"     = "Terciario incompleto",
+      "terciario_completo"       = "Terciario completo",
+      "universitario_incompleto" = "Universitario incompleto",
+      "universitario_completo"   = "Universitario completo",
+      "posgrado_incompleto"      = "Posgrado incompleto",
+      "posgrado_completo"        = "Posgrado completo",
+      "prefiero_no_responder"    = "Prefiero no responder"
+    )
+  ) %>%
+  arrange(desc(porcentaje)) %>%
+  select(`Nivel educativo` = q7_estudios, `%` = porcentaje)
+```
+
+```{r educacion_grupo}
+encuesta_clean %>%
+  group_by(q7_estudios_grupo) %>%
+  summarise(n = sum(weightvec)) %>%
+  mutate(porcentaje = round(n / sum(n) * 100, 1)) %>%
+  arrange(desc(porcentaje)) %>%
+  select(`Nivel educativo (agrupado)` = q7_estudios_grupo, `%` = porcentaje)
+```
+
+## Convivencia en pareja
+
+```{r convivencia}
+encuesta_clean %>%
+  filter(!is.na(q8_hogar_convivencia)) %>%
+  group_by(q8_hogar_convivencia) %>%
+  summarise(n = sum(weightvec)) %>%
+  mutate(
+    porcentaje = round(n / sum(n) * 100, 1),
+    q8_hogar_convivencia = recode(q8_hogar_convivencia,
+      "si_nacida_argentina"   = "Sí, con persona nacida en Argentina",
+      "si_nacida_extranjero"  = "Sí, con persona nacida en otro país",
+      "sin_conyugue"          = "No tiene cónyuge o pareja",
+      "prefiero_no_responder" = "Prefiero no responder"
+    )
+  ) %>%
+  arrange(desc(porcentaje)) %>%
+  select(Convivencia = q8_hogar_convivencia, `%` = porcentaje)
+```
+
+## Hijos menores de 18 años
+
+```{r hijos}
+encuesta_clean %>%
+  filter(!is.na(q9_hijos_menores)) %>%
+  group_by(q9_hijos_menores) %>%
+  summarise(n = sum(weightvec)) %>%
+  mutate(
+    porcentaje = round(n / sum(n) * 100, 1),
+    q9_hijos_menores = recode(q9_hijos_menores,
+      "si" = "Sí",
+      "no" = "No"
+    )
+  ) %>%
+  arrange(desc(porcentaje)) %>%
+  select(`Hijos menores de 18` = q9_hijos_menores, `%` = porcentaje)
+```
+
+Entre quienes tienen hijos menores, la gran mayoría reside en Argentina (94.3%). 
+Los casos con hijos en otro país o en ambos países representan una minoría, aunque 
+son relevantes para el análisis de remesas y vínculos transnacionales.
+
+```{r hijos_residencia}
+encuesta_clean %>%
+  filter(q9_hijos_menores == "si") %>%
+  filter(!is.na(q10_hijos_menores_residencia)) %>%
+  group_by(q10_hijos_menores_residencia) %>%
+  summarise(n = sum(weightvec)) %>%
+  mutate(
+    porcentaje = round(n / sum(n) * 100, 1),
+    q10_hijos_menores_residencia = recode(q10_hijos_menores_residencia,
+      "argentina"        = "En Argentina",
+      "otro_pais"        = "En otro país",
+      "argentina_y_otro" = "En Argentina y en otro país"
+    )
+  ) %>%
+  arrange(desc(porcentaje)) %>%
+  select(`Residencia de hijos menores` = q10_hijos_menores_residencia, `%` = porcentaje)
+```
+
+*Nota: porcentaje calculado sobre quienes declararon tener hijos menores de 18 años 
+(q9 = Sí). Los NA corresponden a quienes respondieron "No" y son filtros lógicos del 
+cuestionario, no datos faltantes.*
+
+---
+
+# Perfil migratorio
+
+## Motivos de salida del país de origen
+
+La pregunta 11 admite respuesta múltiple. Los porcentajes reflejan la proporción 
+ponderada de encuestados que seleccionó cada opción — la suma supera el 100%.
+
+```{r motivos_salida}
+tibble(
+  Motivo = c(
+    "Para conseguir mejor trabajo / mejorar ingresos",
+    "Para estudiar u obtener nuevas experiencias",
+    "Vino con su familia siendo niño/a",
+    "Para reagruparse con familia",
+    "Por violencia o persecución",
+    "Otro"
+  ),
+  `%` = c(
+    round(sum(encuesta_clean$`q11_motivos_salida/trabajo`            * encuesta_clean$weightvec, na.rm = TRUE) / total_pesos * 100, 1),
+    round(sum(encuesta_clean$`q11_motivos_salida/estudio`            * encuesta_clean$weightvec, na.rm = TRUE) / total_pesos * 100, 1),
+    round(sum(encuesta_clean$`q11_motivos_salida/migracion_familiar` * encuesta_clean$weightvec, na.rm = TRUE) / total_pesos * 100, 1),
+    round(sum(encuesta_clean$`q11_motivos_salida/reagrupación`       * encuesta_clean$weightvec, na.rm = TRUE) / total_pesos * 100, 1),
+    round(sum(encuesta_clean$`q11_motivos_salida/violencias`         * encuesta_clean$weightvec, na.rm = TRUE) / total_pesos * 100, 1),
+    round(sum(encuesta_clean$`q11_motivos_salida/otro`               * encuesta_clean$weightvec, na.rm = TRUE) / total_pesos * 100, 1)
+  )
+) %>%
+  arrange(desc(`%`))
+```
+
+---
+
+# Momento 1: Situación laboral en el país de origen
+
+## Situación laboral antes de migrar (Q13)
+
+```{r q13}
+encuesta_clean %>%
+  filter(!is.na(q13_trabajo_origen)) %>%
+  group_by(q13_trabajo_origen) %>%
+  summarise(n = sum(weightvec)) %>%
+  mutate(
+    porcentaje = round(n / sum(n) * 100, 1),
+    q13_trabajo_origen = recode(q13_trabajo_origen,
+      "si"             = "Sí, trabajaba",
+      "no_desempleado" = "No, estaba desempleado/buscando trabajo",
+      "no_ninio"       = "No, era niño/a o adolescente",
+      "no_estudio"     = "No, solo estudiaba",
+      "no_jubilado"    = "No, ya estaba jubilado/retirado"
+    )
+  ) %>%
+  arrange(desc(porcentaje)) %>%
+  select(`Situación laboral en origen` = q13_trabajo_origen, `%` = porcentaje)
+```
+
+## Tipo de ocupación en origen (Q14)
+
+*Porcentajes calculados sobre quienes trabajaban antes de migrar (Q13 = Sí, 41.9% de la muestra).*
+
+```{r q14}
+encuesta_clean %>%
+  filter(q13_trabajo_origen == "si") %>%
+  filter(!is.na(q14_situacion_ocupacional_orig)) %>%
+  group_by(q14_situacion_ocupacional_orig) %>%
+  summarise(n = sum(weightvec)) %>%
+  mutate(
+    porcentaje = round(n / sum(n) * 100, 1),
+    q14_situacion_ocupacional_orig = recode(q14_situacion_ocupacional_orig,
+      "salario_fijo"             = "Trabajo con salario fijo",
+      "cuenta_propia"            = "Trabajo por cuenta propia",
+      "changas"                  = "Trabajos esporádicos / changas / subempleo",
+      "trabajo_sin_remuneracion" = "Trabajo sin remuneración",
+      "otro"                     = "Otra"
+    )
+  ) %>%
+  arrange(desc(porcentaje)) %>%
+  select(`Situación ocupacional en origen` = q14_situacion_ocupacional_orig, `%` = porcentaje)
+```
+
+## Formalidad del trabajo en origen (Q15)
+
+*Porcentajes calculados sobre quienes tenían salario fijo o trabajo por cuenta propia 
+en origen (Q14). Representa el 77.3% del subconjunto que trabajaba.*
+
+```{r q15}
+encuesta_clean %>%
+  filter(q13_trabajo_origen == "si") %>%
+  filter(q14_situacion_ocupacional_orig %in% c("salario_fijo", "cuenta_propia")) %>%
+  filter(!is.na(q15_formalidad_trabajo)) %>%
+  group_by(q15_formalidad_trabajo) %>%
+  summarise(n = sum(weightvec)) %>%
+  mutate(
+    porcentaje = round(n / sum(n) * 100, 1),
+    q15_formalidad_trabajo = recode(q15_formalidad_trabajo,
+      "formal"   = "Formal",
+      "informal" = "Informal"
+    )
+  ) %>%
+  arrange(desc(porcentaje)) %>%
+  select(`Formalidad del trabajo en origen` = q15_formalidad_trabajo, `%` = porcentaje)
+```
+
+## Actividad laboral en origen (Q16)
+
+*Porcentajes calculados sobre quienes trabajaban por cuenta propia o realizaban 
+changas/subempleo en origen (Q14).*
+
+```{r q16}
+encuesta_clean %>%
+  filter(q13_trabajo_origen == "si") %>%
+  filter(q14_situacion_ocupacional_orig %in% c("cuenta_propia", "changas")) %>%
+  filter(!is.na(q16_actividad_origen)) %>%
+  group_by(q16_actividad_origen) %>%
+  summarise(n = sum(weightvec)) %>%
+  mutate(
+    porcentaje = round(n / sum(n) * 100, 1),
+    q16_actividad_origen = recode(q16_actividad_origen,
+      "patron"             = "Patrón de un negocio (empleador)",
+      "profesional"        = "Profesional independiente",
+      "servicio_oficio"    = "Trabajo de servicio u oficio",
+      "emprendimiento"     = "Emprendimiento / negocio familiar",
+      "venta_ambulante"    = "Venta ambulante",
+      "plataforma"         = "Trabajo en plataformas",
+      "trabajo_estacional" = "Trabajo estacional o por períodos",
+      "otro"               = "Otra"
+    )
+  ) %>%
+  arrange(desc(porcentaje)) %>%
+  select(`Actividad laboral en origen` = q16_actividad_origen, `%` = porcentaje)
+```
+
+## Ocupación en origen — exploración de texto libre (Q17)
+
+La pregunta 17 solicitó una descripción en texto libre de la ocupación principal. 
+Se presenta una nube de palabras con los 50 términos más frecuentes como exploración 
+cualitativa. Las palabras fueron preprocesadas eliminando artículos, preposiciones y 
+términos poco informativos en este contexto.
+
+*Nota: la agrupación semántica de ocupaciones (por ejemplo, según clasificación CIUO) 
+queda pendiente para una etapa posterior del análisis.*
+
+```{r q17, fig.align='center'}
+stopwords_es <- c(
+  "de", "en", "la", "el", "los", "las", "un", "una", "y", "a", "por",
+  "con", "del", "al", "se", "su", "que", "o", "para", "pero", "como",
+  "más", "este", "esta", "esto", "entre", "hasta", "desde",
+  "trabajo", "trabajaba", "trabajé", "sector", "área", "empresa", "famili"
+)
+
+palabras_q17 <- encuesta_clean %>%
+  filter(!is.na(q17_ocupacion_origen)) %>%
+  select(q17_ocupacion_origen) %>%
+  unnest_tokens(word, q17_ocupacion_origen) %>%
+  filter(!word %in% stopwords_es) %>%
+  filter(nchar(word) > 3) %>%
+  count(word, sort = TRUE)
+
+wordcloud2(palabras_q17 %>% slice_max(n, n = 50),
+           color = "random-dark",
+           backgroundColor = "white",
+           size = 0.8)
+```
+
+## Cobertura de necesidades básicas en origen (Q18)
+
+*Porcentajes calculados sobre quienes trabajaban antes de migrar (Q13 = Sí).*
+
+```{r q18}
+encuesta_clean %>%
+  filter(q13_trabajo_origen == "si") %>%
+  filter(!is.na(q18_cubre_necesidades)) %>%
+  group_by(q18_cubre_necesidades) %>%
+  summarise(n = sum(weightvec)) %>%
+  mutate(
+    porcentaje = round(n / sum(n) * 100, 1),
+    q18_cubre_necesidades = recode(q18_cubre_necesidades,
+      "completamente"  = "Completamente",
+      "bastante_bien"  = "Bastante bien",
+      "justo"          = "Justo",
+      "insuficiente"   = "Insuficiente",
+      "muy_deficiente" = "Muy deficiente"
+    )
+  ) %>%
+  arrange(desc(porcentaje)) %>%
+  select(`Cobertura de necesidades básicas` = q18_cubre_necesidades, `%` = porcentaje)
+```
+
+---
+
+# Cronología migratoria
+
+## Año de salida del país de origen (Q12)
+
+Se identificaron 11 casos con valores imposibles o inverosímiles. El criterio de 
+corrección combinó tres fuentes: el valor registrado, la edad del encuestado y el año 
+de arribo a Argentina. Se detectaron dos tipos de error: errores tipográficos (dígitos 
+transpuestos o faltantes) y casos donde el encuestado registró su **edad al salir** en 
+lugar del año — hipótesis sostenida por la coherencia entre `2025 - edad_al_salir` y 
+el año de arribo declarado. Se recuperaron 6 casos y se convirtieron a NA los 4 
+irrecuperables. El caso con valor 1949 fue conservado por ser consistente con la edad 
+declarada (76 años).
+
+```{r q12}
+encuesta_clean %>%
+  filter(!is.na(q12_anio_salida)) %>%
+  mutate(
+    q12_periodo_salida = case_when(
+      q12_anio_salida < 1980                            ~ "Antes de 1980",
+      q12_anio_salida >= 1980 & q12_anio_salida <= 1989 ~ "1980-1989",
+      q12_anio_salida >= 1990 & q12_anio_salida <= 1999 ~ "1990-1999",
+      q12_anio_salida >= 2000 & q12_anio_salida <= 2004 ~ "2000-2004",
+      q12_anio_salida >= 2005 & q12_anio_salida <= 2009 ~ "2005-2009",
+      q12_anio_salida >= 2010 & q12_anio_salida <= 2014 ~ "2010-2014",
+      q12_anio_salida >= 2015 & q12_anio_salida <= 2019 ~ "2015-2019",
+      q12_anio_salida >= 2020                           ~ "2020-2025"
+    )
+  ) %>%
+  count(q12_periodo_salida) %>%
+  mutate(porcentaje = round(n / sum(n) * 100, 1)) %>%
+  select(`Período de salida` = q12_periodo_salida, `%` = porcentaje)
+```
+
+*Nota: esta tabla usa conteo simple (sin ponderar) dado que Q12 es una variable de 
+contexto cronológico, no una variable de análisis sustantivo.*
+
+## Año de arribo a Argentina (Q19)
+
+Se identificaron 3 casos con valores problemáticos. Se aplicó el mismo criterio que en 
+Q12: 1 caso fue recuperado (valor 21 interpretado como edad al llegar, coherente con el 
+año de salida declarado) y 2 fueron convertidos a NA por tener ambos campos — salida y 
+arribo — corruptos sin posibilidad de inferencia.
+
+```{r q19}
+encuesta_clean %>%
+  filter(!is.na(q19_anio_arribo)) %>%
+  mutate(
+    q19_periodo_arribo = case_when(
+      q19_anio_arribo < 1980                            ~ "Antes de 1980",
+      q19_anio_arribo >= 1980 & q19_anio_arribo <= 1989 ~ "1980-1989",
+      q19_anio_arribo >= 1990 & q19_anio_arribo <= 1999 ~ "1990-1999",
+      q19_anio_arribo >= 2000 & q19_anio_arribo <= 2004 ~ "2000-2004",
+      q19_anio_arribo >= 2005 & q19_anio_arribo <= 2009 ~ "2005-2009",
+      q19_anio_arribo >= 2010 & q19_anio_arribo <= 2014 ~ "2010-2014",
+      q19_anio_arribo >= 2015 & q19_anio_arribo <= 2019 ~ "2015-2019",
+      q19_anio_arribo >= 2020                           ~ "2020-2025"
+    )
+  ) %>%
+  count(q19_periodo_arribo) %>%
+  mutate(porcentaje = round(n / sum(n) * 100, 1)) %>%
+  select(`Período de arribo` = q19_periodo_arribo, `%` = porcentaje)
+```
+
+*Nota: ídem Q12, conteo simple sin ponderar.*
