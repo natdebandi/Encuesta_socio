@@ -25,13 +25,6 @@ encuesta_clean <- encuesta %>%
 
 cat("Columnas después de la limpieza:", ncol(encuesta_clean))
 
-# Descargamos la librería survey para incorporar el trabajo con pesos muestrales. BORRAR
-if (!require(survey)) install.packages("survey")
-library(survey)
-
-# Declarar diseño
-diseno <- svydesign(ids = ~1, weights = ~weightvec, data = encuesta_clean)
-
 # Perfil sociodemográfico ponderado
 # TABLAS DE DISTRIBUCIONES
 # NACIONALIDAD 
