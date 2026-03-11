@@ -25,22 +25,70 @@ encuesta_clean <- encuesta %>%
 
 cat("Columnas después de la limpieza:", ncol(encuesta_clean))
 
-# Descargamos la librería survey para incorporar el trabajo con pesos muestrales. BORRAR
-if (!require(survey)) install.packages("survey")
-library(survey)
+# AGRUPACIÓN DE PAÍSES — basada en clasificación de Camila
+encuesta_clean <- encuesta_clean %>%
+  mutate(
+    # Migrante regional (latinoamericano + Caribe)
+    inregion_migrant = case_when(
+      nacionalidad %in% c("bolivia", "brasil", "chile", "colombia", "ecuador",
+                          "haiti", "paraguay", "per", "rep_blica_dominicana",
+                          "uruguay", "venezuela") ~ 1,
+      nacionalidad %in% c("Haiti", "Venezuela", "Mexico", "México", "Cuba",
+                          "Guatemala", "Panamá", "Costa Rica", "Puerto Rico",
+                          "Trinidad y Tobago") ~ 1,
+      TRUE ~ 0
+    ),
+    
+    # Migrante del sur global (agrega Senegal y Guinea Bissau)
+    south_migrant = case_when(
+      inregion_migrant == 1 ~ 1,
+      nacionalidad == "senegal" ~ 1,
+      otro_pais %in% c("Senegal", "Guinea Bissau") ~ 1,
+      TRUE ~ 0
+    ),
+    
+    # Países principales del estudio
+    big5_country = case_when(
+      nacionalidad %in% c("bolivia", "colombia", "paraguay", "per", "venezuela") ~ 1,
+      TRUE ~ 0
+    )
+  )
+# EXPLORACIÓN SIN PONDERAR — cantidad de casos por nacionalidad
+encuesta_clean %>%
+  filter(!is.na(nacionalidad)) %>%
+  count(nacionalidad, sort = TRUE) %>%
+  mutate(porcentaje_muestra = round(n / sum(n) * 100, 1)) %>%
+  select(Nacionalidad = nacionalidad, `N (sin ponderar)` = n, `% muestra` = porcentaje_muestra)
 
-# Declarar diseño
-diseno <- svydesign(ids = ~1, weights = ~weightvec, data = encuesta_clean)
 
 # Perfil sociodemográfico ponderado
 # TABLAS DE DISTRIBUCIONES
-# NACIONALIDAD 
+# NACIONALIDAD PONDERADA
 encuesta_clean %>%
   group_by(nac) %>%
   summarise(n = sum(weightvec)) %>%
   mutate(porcentaje = round(n / sum(n) * 100, 1)) %>%
   arrange(desc(porcentaje)) %>%
   select(Nacionalidad = nac, `%` = porcentaje)
+
+# COMPARACIÓN — distribución ponderada vs sin ponderar
+encuesta_clean %>%
+  filter(!is.na(nacionalidad)) %>%
+  group_by(nacionalidad) %>%
+  summarise(
+    n_sin_ponderar = n(),
+    n_ponderado    = round(sum(weightvec), 1)
+  ) %>%
+  mutate(
+    pct_sin_ponderar = round(n_sin_ponderar / sum(n_sin_ponderar) * 100, 1),
+    pct_ponderado    = round(n_ponderado    / sum(n_ponderado)    * 100, 1)
+  ) %>%
+  arrange(desc(n_sin_ponderar)) %>%
+  select(Nacionalidad = nacionalidad,
+         `N`          = n_sin_ponderar,
+         `% sin pond` = pct_sin_ponderar,
+         `% ponderado`= pct_ponderado)
+
 
 # SEXO
 encuesta_clean %>%
@@ -313,7 +361,103 @@ encuesta_clean %>%
   arrange(desc(porcentaje)) %>%
   select(`Actividad laboral en origen` = q16_actividad_origen, `%` = porcentaje)
 
-# Q17 - Ocupación en origen (texto libre) — Trabajamos con nube de palabras
+# Q17 - Ocupación en origen (texto libre) — 
+encuesta_clean <- encuesta_clean %>%
+  mutate(
+    q17_lower = str_to_lower(q17_ocupacion_origen),
+    
+    ocupacion_origen = case_when(
+      
+      # 1 - Trabajo doméstico y de cuidados
+      str_detect(q17_lower, "limpieza|camarera|niñ|cuidado|cuidad|mesera|doméstic|domestic|empleada del hogar|ama de casa|casa de familia|empleada de casa|empleada en casa") ~ 1,
+      
+      # 2 - Profesional y técnico
+      str_detect(q17_lower, "ingenier|abog|medic|médic|odont|bioquim|bioquím|contador|auditor|psicol|psicól|psicopedag|farmac|nutricion|veterinar|citotecn|trabajador social|trabajadora social|lic\\.|licenciad|enferm|salud|químic|quimic|dermatoc|cosmetol|architect|arquitect|programad|informát|informatic|desarroll|web|software|sociolog|sociólog|antropol|economista|paralegal|jurídic|juridic|aduaner") ~ 2,
+      
+      # 3 - Administrativo, financiero y oficina
+      str_detect(q17_lower, "data entry|administr|adm |rrhh|banco|empleado|oficina|secretar|recepcion|contabil|analista|asistente|impuesto|recursos humanos|calidad|operacion|operación|soporte|marketing") ~ 3,
+      
+      # 4 - Ama de casa / trabajo no remunerado
+      str_detect(q17_lower, "ama de casa|hogar") ~ 4,
+      
+      # 5 - Agrícola y rural
+      str_detect(q17_lower, "agric|algodón|algodon|verdul|campo|cosecha|cosechero|ganadería|ganaderia|chacra|rural|minero|miner|madera|^agrícola$|^agricola$") ~ 5,
+      
+      # 6 - Oficios manuales y técnicos
+      str_detect(q17_lower, "mantenimiento|herrero|soldad|electric|metal|fabr|tecnico|técnico|mecanic|mecán|plomer|carpinter|albañil|albanil|construcc|costrucc|c0nstructor|pintor|costur|peluquer|peñuquer|estilista|chapa|tejido|textil|operari|operaría|joyería|joyeria|ropa|maletero|cargador|changarin|changas|seguridad|guardia|auxiliar de carga|designer de joyas|tránsito aéreo|transito aereo") ~ 6,
+      
+      # 7 - Ventas, comercio y logística
+      str_detect(q17_lower, "venta|vendedor|vendedora|negocio|distribu|almacén|almacen|supermercado|comerci|logistic|depósito|deposito|tienda|librer|cajero|cajera|taxista|chofer|chófer|camionero|transport|despacho|mercadeo|consumo masivo|vetas") ~ 7,
+      
+      # 8 - Atención al cliente y servicios
+      str_detect(q17_lower, "atención|atencion|teleoperador|bartender|delivery|mozo|gastrono|cociner|chef|call center|turismo|hotelería|hoteleria|masoterap|estética|estetica|entrenador|musculac|ayudante de cocina|cantina") ~ 8,
+      
+      # 9 - Consultoría y gerencia
+      str_detect(q17_lower, "consult|project manager|freelancer|asesor|gerente|manager|coordinad|supervisor|jefe|jefa|director|directora|team leader|mando medio|gestión|gestion") ~ 9,
+      
+      # 10 - Educación, cultura y medios
+      str_detect(q17_lower, "maestra|maestr|profesor|universitario|docente|docencia|educac|educador|periodis|comunicac|comunicad|diseñ|diseñador|arte|artista|música|musica|radialis|locutor|audiovisual|fotografo|fotógraf|operadora cultural|apoyo escolar|ayuda escolar|actriz") ~ 10,
+      
+      # 11 - Emprendimiento e independiente
+      str_detect(q17_lower, "emprend|enprendim|taller|independiente|propio|propietari|empresari|dueño|start up") ~ 11,
+      
+      # 12 - Sector público
+      str_detect(q17_lower, "public|municipal|consulado|empresa estatal|estado|gobierno|funcionario|empleada pública|empleado público|empleada publica|empleado publico") ~ 12,
+      
+      # 13 - Investigación y academia
+      str_detect(q17_lower, "investig|proyectos sociales|medio ambientales|académic|academico|becari|doctoral") ~ 13,
+      
+      # 0 - Sin clasificar (incluye irrecuperables: "of", "Ñabiadi", "Era una playa", etc.)
+      !is.na(q17_lower) ~ 0,
+      TRUE ~ NA_real_
+    )
+  )
+
+# TABLA COMPARATIVA — ponderada vs sin ponderar
+encuesta_clean %>%
+  filter(!is.na(ocupacion_origen)) %>%
+  mutate(
+    label_ocupacion = recode(as.character(ocupacion_origen),
+                             "0"  = "Sin clasificar",
+                             "1"  = "Trabajo doméstico y de cuidados",
+                             "2"  = "Profesional y técnico",
+                             "3"  = "Administrativo y financiero",
+                             "4"  = "Ama de casa / no remunerado",
+                             "5"  = "Agrícola y rural",
+                             "6"  = "Oficios manuales y técnicos",
+                             "7"  = "Ventas y comercio",
+                             "8"  = "Atención al cliente y servicios",
+                             "9"  = "Consultoría y gerencia",
+                             "10" = "Educación, cultura y medios",
+                             "11" = "Emprendimiento e independiente",
+                             "12" = "Sector público",
+                             "13" = "Investigación y academia"
+    )
+  ) %>%
+  group_by(label_ocupacion) %>%
+  summarise(
+    n_sin_ponderar = n(),
+    n_ponderado    = sum(weightvec)
+  ) %>%
+  mutate(
+    pct_sin_ponderar = round(n_sin_ponderar / sum(n_sin_ponderar) * 100, 1),
+    pct_ponderado    = round(n_ponderado    / sum(n_ponderado)    * 100, 1)
+  ) %>%
+  arrange(desc(n_sin_ponderar)) %>%
+  select(
+    `Ocupación en origen`  = label_ocupacion,
+    `N`                    = n_sin_ponderar,
+    `% sin ponderar`       = pct_sin_ponderar,
+    `% ponderado`          = pct_ponderado
+  )
+
+# Verificación de los casos que quedaron "Sin clasificar"
+encuesta_clean %>%
+  filter(ocupacion_origen == 0) %>%
+  select(q17_ocupacion_origen) %>%
+  print(n = Inf)
+
+#Trabajamos con nube de palabras
 
 if (!require(wordcloud2)) install.packages("wordcloud2")
 if (!require(tidytext)) install.packages("tidytext")
