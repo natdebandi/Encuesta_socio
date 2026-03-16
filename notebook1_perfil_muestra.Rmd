@@ -1,0 +1,598 @@
+---
+title: "Notebook 1 — Perfil de la muestra y análisis sociodemográfico"
+subtitle: "Encuesta sobre trayectorias sociolaborales de personas migrantes en AMBA"
+author: "Universidad de Tübingen / UNSAM"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    theme: flatly
+    highlight: tango
+    df_print: kable
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo    = FALSE,
+  warning = FALSE,
+  message = FALSE,
+  fig.width  = 9,
+  fig.height = 5.5
+)
+```
+
+```{r librerias}
+library(tidyverse)
+library(readr)
+library(paletteer)
+library(treemapify)
+library(ggplot2)
+library(ggthemes)
+```
+
+```{r carga-y-limpieza}
+encuesta <- read_csv(
+  "data/Trayectorias laborales vf kobo weightvec v3.csv",
+  locale        = locale(encoding = "UTF-8"),
+  show_col_types = FALSE
+)
+
+encuesta_clean <- encuesta %>%
+  select(
+    -`q40_estudios/s__estudios_de_nivel_primario`,
+    -`q40_estudios/s__estudios_de_nivel_secundario`,
+    -`q40_estudios/s__estudios_de_nivel_terciario__institut`,
+    -`q40_estudios/s__estudios_universitarios__carrera_de_g`,
+    -`q40_estudios/s__estudios_de_postgrado`,
+    -`q40_estudios/s__capacitaciones_laborales_profesionale`,
+    -`q40_estudios/no__no_estudi__desde_que_llegu__a_argent`,
+    -`...1`, -`__version__`, -`_tags`, -`_index`,
+    -start, -end
+  ) %>%
+  mutate(q19_anio_arribo = case_when(
+    q19_anio_arribo == 21             ~ 2004,
+    q19_anio_arribo %in% c(18, 1918) ~ NA_real_,
+    TRUE                              ~ q19_anio_arribo
+  ))
+
+total_pesos <- sum(encuesta_clean$weightvec)
+
+encuesta_clean <- encuesta_clean %>%
+  mutate(q7_estudios_grupo = case_when(
+    q7_estudios == "sin_estudios"                                    ~ "Sin estudios",
+    q7_estudios %in% c("primario_incompleto", "primario_completo")   ~ "Hasta primario completo",
+    q7_estudios %in% c("secundario_incompleto", "secundario_completo") ~ "Hasta secundario completo",
+    q7_estudios %in% c("terciario_incompleto", "terciario_completo") ~ "Hasta terciario completo",
+    q7_estudios %in% c("universitario_incompleto", "universitario_completo",
+                       "posgrado_incompleto", "posgrado_completo")   ~ "Universitario y posgrado",
+    TRUE ~ NA_character_
+  ) %>%
+  factor(levels = c("Sin estudios",
+                    "Hasta primario completo",
+                    "Hasta secundario completo",
+                    "Hasta terciario completo",
+                    "Universitario y posgrado")))
+```
+
+---
+
+# 1. Descripción del proyecto
+
+Esta encuesta relevaron trayectorias sociolaborales de personas migrantes residentes en el Área Metropolitana de Buenos Aires (AMBA). Fue diseñada en el marco de una colaboración entre la Universidad de Tübingen y la UNSAM. La muestra cuenta con **`r nrow(encuesta_clean)` casos** con pesos muestrales calibrados según el Censo Nacional de Población 2022, los detalles del proceso de limpieza y calibración de la muestra se encuentran documentados en el archivo *Procesos de limpieza y calibracion realizados*.
+
+El cuestionario está organizado en tres momentos: situación en el **país de origen**, **primer año en Argentina**, y **situación actual**.
+
+---
+
+# 2. Pesos muestrales
+
+Los pesos muestrales calibran la muestra para que sea representativa de la población migrante según el Censo 2022. Un peso mayor a 1 indica que ese perfil estaba subrepresentado en la muestra; menor a 1, sobrerepresentado. A continuación se presenta un boxplot por las principales nacionalidades, agrupadas según se definió en
+los criterios de limpieza antes mencionados.
+
+## 2.1 Distribución de pesos por nacionalidad.
+
+El dataset tiene 3 variables de país para los encuestados.
+**nacionalidad** = Variable que agrupa los valores del multiple choice. No tiene NA.
+**otro_pais** = Campo sólo completable en el caso que el encuestado seleccione "otro" en la pregunta anterior. 
+**nac** = Variable agrupada según criterios metodológicos definidos en el documento de limpieza y calibración. Se utilizará esta variable de ahora en más salvo que se especifique lo contrario.
+
+Destacan los casos de Venezuela y Colombia por sobrerreperesentación en la muestra y el caso de Uruguay y Paraguay por subrrepresentación según las calibraciones realizadas.
+```{r boxplot-pesos}
+encuesta_clean %>%
+  filter(!is.na(nac)) %>%
+  ggplot(aes(x = reorder(nac, weightvec, FUN = median), 
+             y = weightvec, 
+             fill = reorder(nac, weightvec, FUN = median))) +
+  geom_boxplot(show.legend = FALSE, alpha = 0.8) +
+  geom_hline(yintercept = 1, linetype = "dashed", color = "gray40") +
+  scale_fill_manual(values = paletteer_c("ggthemes::Orange-Gold", 
+                                         length(unique(encuesta_clean$nac[!is.na(encuesta_clean$nac)])))) +
+  coord_flip() +
+  labs(
+    title = "Distribución de pesos muestrales por nacionalidad",
+    subtitle = "Línea punteada = peso = 1 (sin corrección)",
+    x = NULL,
+    y = "Peso muestral (weightvec)",
+    caption = "Pesos calibrados según Censo 2022"
+  ) +
+  theme_minimal(base_size = 12)
+```
+
+## 2.2 Casos con peso > 5
+
+Se exploraon en detalle los casos con peso muestral mayor a 5. 
+Se presenta una tabla utilizando la variable "nacionalidad" sin agrupar en "Otros", ya que la mayoría correspondían a este universo. También se destaca que son personas en el rango etario más alto y más bajo. 
+
+```{r outliers-pesos}
+encuesta_clean %>%
+  filter(weightvec > 5) %>%
+  select(Nacionalidad    = nacionalidad,
+         Peso            = weightvec,
+         Sexo            = sexo,
+         `Edad agrupada` = edad_agrupada,
+         Zona            = zona) %>%
+  arrange(desc(Peso))
+```
+
+# 3. Exploración de la Distribución por nacionalidad
+
+La "Diferencia" es interpretable como el efecto que tuvo la ponderación sobre cada nacionalidad, en el caso de Venezuela bajó considerablemente su representatividad; mientras que la de Paraguay y "otros" se vio aumentada. 
+
+```{r tabla-nac}
+treemap_data %>%
+  arrange(desc(n_sin_ponderar)) %>%
+  mutate(diferencia = round(pct_ponderado - pct_sin_ponderar, 1)) %>%
+  select(
+    Nacionalidad     = nac,
+    `N sin ponderar`              = n_sin_ponderar,
+    `% sin ponderar` = pct_sin_ponderar,
+    `% ponderado`    = pct_ponderado,
+    `Diferencia`     = diferencia
+  )
+```
+
+
+
+## 3.1 Treemap — Sin ponderar
+
+A través del siguiente gráfico sobre la variable recodificada "Nac" se explora la distribución de casos por país de la muestra, sin ponderar.
+
+
+```{r treemap-sin-ponderar}
+treemap_data <- encuesta_clean %>%
+  filter(!is.na(nac)) %>%
+  group_by(nac) %>%
+  summarise(
+    n_sin_ponderar = n(),
+    n_ponderado    = sum(weightvec)
+  ) %>%
+  mutate(
+    pct_sin_ponderar = round(n_sin_ponderar / sum(n_sin_ponderar) * 100, 1),
+    pct_ponderado    = round(n_ponderado    / sum(n_ponderado)    * 100, 1)
+  )
+
+colores_tm <- paletteer_c("ggthemes::Orange-Gold", nrow(treemap_data))
+
+ggplot(treemap_data,
+       aes(area  = n_sin_ponderar,
+           fill  = pct_sin_ponderar,
+           label = paste0(nac, "\n", pct_sin_ponderar, "%"))) +
+  geom_treemap(show.legend = FALSE) +
+  geom_treemap_text(color = "white", fontface = "bold",
+                    place = "centre", reflow = TRUE) +
+  scale_fill_gradientn(colors = colores_tm) +
+  labs(title   = "Distribución por nac — sin ponderar",
+       caption = "Encuesta trayectorias sociolaborales AMBA.") +
+  theme_minimal()
+```
+
+## 3.2 Treemap — ponderado
+
+Visualización de distribución según los datos ponderados.
+
+```{r treemap-ponderado}
+ggplot(treemap_data,
+       aes(area  = n_ponderado,
+           fill  = pct_ponderado,
+           label = paste0(nac, "\n", pct_ponderado, "%"))) +
+  geom_treemap(show.legend = FALSE) +
+  geom_treemap_text(color = "white", fontface = "bold",
+                    place = "centre", reflow = TRUE) +
+  scale_fill_gradientn(colors = colores_tm) +
+  labs(title   = "Distribución por nac — ponderado (Censo 2022)",
+       caption = "Encuesta trayectorias sociolaborales AMBA.") +
+  theme_minimal()
+```
+
+## 3.3 Categorización "Otros"
+Exploración del Top 10 de los países agrupados como "Otros" según variable "nac", teniendo en cuenta la variable "nacionalidad" y, cuando aplica, "otro_pais".
+```{r}
+encuesta_clean %>%
+  filter(nac == "otros") %>%
+  group_by(nacionalidad, otro_pais) %>%
+  summarise(
+    N             = n(),
+    n_ponderado   = round(sum(weightvec), 1),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    porcentaje    = round(N / sum(N) * 100, 1),
+    pct_ponderado = round(n_ponderado / sum(n_ponderado) * 100, 1),
+    otro_pais     = replace_na(otro_pais, "-")
+  ) %>%
+  arrange(desc(N)) %>%
+  select(
+    Nacionalidad     = nacionalidad,
+    `País ("otro" en la encuesta)`    = otro_pais,
+    N                = N,
+    `% sin ponderar` = porcentaje,
+    `% ponderado`    = pct_ponderado
+  )
+```
+
+
+---
+
+# 4. Variables sociodemográficas - Análisis Univariado
+Dado que estas variables presentan menos valores posibles que "nacionalidad" se las analiza en este bloque una por una.
+
+## 4.1 Sexo
+Distribución según sexo, ponderado y sin ponderar.
+
+```{r sexo}
+encuesta_clean %>%
+  group_by(sexo) %>%
+  summarise(
+    n_sin_ponderar = n(),
+    n_ponderado    = sum(weightvec)
+  ) %>%
+  mutate(
+    `% sin ponderar` = round(n_sin_ponderar / sum(n_sin_ponderar) * 100, 1),
+    `% ponderado`    = round(n_ponderado    / sum(n_ponderado)    * 100, 1)
+  ) %>%
+  arrange(desc(n_sin_ponderar)) %>%
+  select(
+    Sexo             = sexo,
+    `N`              = n_sin_ponderar,
+    `% sin ponderar`,
+    `% ponderado`
+  )
+```
+Según se estableció en el documento de calibración de pesos muestrales, a quienes respondieron "otro" en sexo se les asignó peso muestral = 1.
+
+Los varones ganaron peso muestral en la ponderación.
+
+## 4.2 Grupos etarios
+Distribución de grupos etarios.
+
+```{r edad}
+encuesta_clean %>%
+  filter(!is.na(edad_agrupada)) %>%
+  group_by(edad_agrupada) %>%
+  summarise(
+    n_sin_ponderar = n(),
+    n_ponderado    = sum(weightvec)
+  ) %>%
+  mutate(
+    `% sin ponderar` = round(n_sin_ponderar / sum(n_sin_ponderar) * 100, 1),
+    `% ponderado`    = round(n_ponderado    / sum(n_ponderado)    * 100, 1),
+    Diferencia       = round(`% ponderado` - `% sin ponderar`, 1)
+  ) %>%
+  select(
+    `Grupo etario`   = edad_agrupada,
+    `N`              = n_sin_ponderar,
+    `% sin ponderar`,
+    `% ponderado`,
+    Diferencia
+  )
+```
+Se observa que el segmento de 36-55 y 56-64 estaban sobrerrepresentados en la muestra y cederon peso porcentual hacia los segmentos más bajos y altos de la población tras el proceso de calibración.
+
+Tras la calibración, los segmentos 25-35 y 36-55 sumados alcanzan el 63% de los casos.
+
+## 4.3 Zona de residencia
+En el proceso de calibración se definieron 4 posibles valores: Zona Sur, Zona Oeste, Zona Norte y CABA.
+
+De las 4 Zonas disponibles, la Ciudad Autónoma de Buenos Aires es la única sobrerrepresentada, aun así, tras la ponderación es la zona con mayor cantidad de casos. 
+
+```{r zona}
+encuesta_clean %>%
+  filter(!is.na(zona)) %>%
+  group_by(zona) %>%
+  summarise(
+    n_sin_ponderar = n(),
+    n_ponderado    = sum(weightvec)
+  ) %>%
+  mutate(
+    `% sin ponderar` = round(n_sin_ponderar / sum(n_sin_ponderar) * 100, 1),
+    `% ponderado`    = round(n_ponderado    / sum(n_ponderado)    * 100, 1),
+    Diferencia       = round(`% ponderado` - `% sin ponderar`, 1)
+  ) %>%
+  arrange(desc(n_sin_ponderar)) %>%
+  select(
+    Zona             = zona,
+    `N`              = n_sin_ponderar,
+    `% sin ponderar`,
+    `% ponderado`,
+    Diferencia
+  )
+```
+
+## 4.4.a Nivel educativo
+Distribución de las respuestas a la pregunta 7: "Indique su máximo nivel de estudios alcanzado".
+
+```{r educacion}
+encuesta_clean %>%
+  filter(!is.na(q7_estudios)) %>%
+  group_by(q7_estudios) %>%
+  summarise(
+    n_sin_ponderar = n(),
+    n_ponderado    = sum(weightvec)
+  ) %>%
+  mutate(
+    `% sin ponderar` = round(n_sin_ponderar / sum(n_sin_ponderar) * 100, 1),
+    `% ponderado`    = round(n_ponderado    / sum(n_ponderado)    * 100, 1),
+    Diferencia       = round(`% ponderado` - `% sin ponderar`, 1),
+    q7_estudios      = recode(q7_estudios,
+      "sin_estudios"             = "Sin estudios",
+      "primario_incompleto"      = "Primario incompleto",
+      "primario_completo"        = "Primario completo",
+      "secundario_incompleto"    = "Secundario incompleto",
+      "secundario_completo"      = "Secundario completo",
+      "terciario_incompleto"     = "Terciario incompleto",
+      "terciario_completo"       = "Terciario completo",
+      "universitario_incompleto" = "Universitario incompleto",
+      "universitario_completo"   = "Universitario completo",
+      "posgrado_incompleto"      = "Posgrado incompleto",
+      "posgrado_completo"        = "Posgrado completo",
+      "prefiero_no_responder"    = "Prefiero no responder"
+    )
+  ) %>%
+  arrange(desc(n_sin_ponderar)) %>%
+  select(
+    `Nivel educativo` = q7_estudios,
+    `N`               = n_sin_ponderar,
+    `% sin ponderar`,
+    `% ponderado`,
+    Diferencia
+  )
+
+```
+
+## 4.4.b Nivel educativo agrupado
+Se propone la siguiente agrupación por nivel educativo para facilitar la interpretación de los resultados. Dejamos por fuera al caso "Prefiero no responder", por considerarlo irrelevante para este análisis. 
+
+```{r}
+encuesta_clean %>%
+  filter(!is.na(q7_estudios_grupo)) %>%
+  group_by(q7_estudios_grupo) %>%
+  summarise(
+    n_sin_ponderar = n(),
+    n_ponderado    = sum(weightvec)
+  ) %>%
+  mutate(
+    `% sin ponderar` = round(n_sin_ponderar / sum(n_sin_ponderar) * 100, 1),
+    `% ponderado`    = round(n_ponderado    / sum(n_ponderado)    * 100, 1),
+    Diferencia       = round(`% ponderado` - `% sin ponderar`, 1)
+  ) %>%
+  arrange(desc(n_sin_ponderar)) %>%
+  select(
+    `Nivel educativo agrupado` = q7_estudios_grupo,
+    `N`                        = n_sin_ponderar,
+    `% sin ponderar`,
+    `% ponderado`,
+    Diferencia
+  )
+```
+Se observa que la encuesta fue respondida en mayor proporción por personas con mayor nivel educativo; tras la calibración cedieron peso muestral a los otros 4 grupos.
+
+
+
+## 4.5 Situación documentaria
+
+```{r}
+encuesta_clean %>%
+  filter(!is.na(q6_situacion_documentaria)) %>%
+  group_by(q6_situacion_documentaria) %>%
+  summarise(
+    n_sin_ponderar = n(),
+    n_ponderado    = sum(weightvec)
+  ) %>%
+  mutate(
+    `% sin ponderar`           = round(n_sin_ponderar / sum(n_sin_ponderar) * 100, 1),
+    `% ponderado`              = round(n_ponderado    / sum(n_ponderado)    * 100, 1),
+    Diferencia                 = round(`% ponderado` - `% sin ponderar`, 1),
+    q6_situacion_documentaria  = recode(q6_situacion_documentaria,
+      "rsidencia_permanente"   = "Residencia permanente",
+      "naturalizado"           = "Naturalizado/a",
+      "residencia_temporaria"  = "Residencia temporaria",
+      "precaria_vigente"       = "Precaria vigente",
+      "sin_dni"                = "Sin DNI",
+      "otra"                   = "Otra",
+      "precaria_vencida"       = "Precaria vencida"
+    )
+  ) %>%
+  arrange(desc(n_sin_ponderar)) %>%
+  select(
+    `Situación documentaria` = q6_situacion_documentaria,
+    `N`                      = n_sin_ponderar,
+    `% sin ponderar`,
+    `% ponderado`,
+    Diferencia
+  )
+```
+
+
+
+## 4.5 Convivencia en pareja
+
+```{r convivencia}
+encuesta_clean %>%
+  filter(!is.na(q8_hogar_convivencia)) %>%
+  group_by(q8_hogar_convivencia) %>%
+  summarise(
+    n_sin_ponderar = n(),
+    n_ponderado    = sum(weightvec)
+  ) %>%
+  mutate(
+    `% sin ponderar`     = round(n_sin_ponderar / sum(n_sin_ponderar) * 100, 1),
+    `% ponderado`        = round(n_ponderado    / sum(n_ponderado)    * 100, 1),
+    Diferencia           = round(`% ponderado` - `% sin ponderar`, 1),
+    q8_hogar_convivencia = recode(q8_hogar_convivencia,
+      "si_nacida_argentina"   = "Si, con persona nacida en Argentina",
+      "si_nacida_extranjero"  = "Si, con persona nacida en otro pais",
+      "sin_conyugue"          = "Sin conyuge o pareja",
+      "prefiero_no_responder" = "Prefiero no responder"
+    )
+  ) %>%
+  arrange(desc(n_sin_ponderar)) %>%
+  select(
+    Convivencia      = q8_hogar_convivencia,
+    `N`              = n_sin_ponderar,
+    `% sin ponderar`,
+    `% ponderado`,
+    Diferencia
+  )
+```
+
+## 4.6 Hijos menores de 18
+
+```{r hijos}
+encuesta_clean %>%
+  filter(!is.na(q9_hijos_menores)) %>%
+  group_by(q9_hijos_menores) %>%
+  summarise(n = sum(weightvec)) %>%
+  mutate(
+    porcentaje       = round(n / sum(n) * 100, 1),
+    q9_hijos_menores = recode(q9_hijos_menores, "si" = "Sí", "no" = "No")
+  ) %>%
+  arrange(desc(porcentaje)) %>%
+  select(`Hijos menores de 18` = q9_hijos_menores, `%` = porcentaje)
+```
+
+---
+
+# 5. Análisis bivariado
+
+## 5.1 Grupos etarios por nac
+
+```{r edad-nac}
+encuesta_clean %>%
+  filter(!is.na(nac), !is.na(edad_agrupada)) %>%
+  group_by(nac, edad_agrupada) %>%
+  summarise(n = sum(weightvec), .groups = "drop") %>%
+  group_by(nac) %>%
+  mutate(porcentaje = round(n / sum(n) * 100, 1)) %>%
+  ungroup() %>%
+  mutate(edad_agrupada = factor(edad_agrupada,
+                                levels = rev(c("18-24","25-35","36-55","56-64","65-100")))) %>%
+  ggplot(aes(x    = reorder(nac, porcentaje),
+             y    = porcentaje,
+             fill = edad_agrupada)) +
+  geom_col(position = "stack") +
+  scale_fill_manual(
+    values = rev(paletteer_c("ggthemes::Orange-Gold", 5)),
+    guide  = guide_legend(reverse = TRUE)
+  ) +
+  coord_flip() +
+  labs(
+    title   = "Distribución de grupos etarios por nac",
+    x       = NULL, y = "%", fill = "Grupo etario",
+    caption = "Datos ponderados. Nota: Venezuela presenta una concentración marcada en el segmento 18-35 años.\nEncuesta trayectorias sociolaborales AMBA."
+  ) +
+  theme_minimal(base_size = 12)
+```
+
+## 5.2 Distribución territorial por nac
+
+```{r zona-nac}
+encuesta_clean %>%
+  filter(!is.na(nac), !is.na(zona)) %>%
+  group_by(nac, zona) %>%
+  summarise(n = sum(weightvec), .groups = "drop") %>%
+  group_by(nac) %>%
+  mutate(porcentaje = round(n / sum(n) * 100, 1)) %>%
+  ungroup() %>%
+  mutate(zona = factor(zona,
+                       levels = c("zona_caba","zona_norte","zona_oeste","zona_sur"))) %>%
+  ggplot(aes(x    = reorder(nac, porcentaje),
+             y    = porcentaje,
+             fill = zona)) +
+  geom_col(position = "stack") +
+  scale_fill_manual(
+    values = c("zona_caba"  = "#F5C242",
+               "zona_norte" = "#E8873A",
+               "zona_oeste" = "#C94F1A",
+               "zona_sur"   = "#7B1F0A"),
+    labels = c("CABA","Zona Norte","Zona Oeste","Zona Sur"),
+    guide  = guide_legend(reverse = TRUE)
+  ) +
+  coord_flip() +
+  labs(
+    title   = "Distribución territorial por nac",
+    x       = NULL, y = "%", fill = "Zona",
+    caption = "Datos ponderados. Encuesta trayectorias sociolaborales AMBA."
+  ) +
+  theme_minimal(base_size = 12)
+```
+
+## 5.3 Nivel educativo por nac
+
+```{r educacion-nac}
+encuesta_clean %>%
+  filter(!is.na(nac), !is.na(q7_estudios)) %>%
+  group_by(nac, q7_estudios) %>%
+  summarise(n = sum(weightvec), .groups = "drop") %>%
+  group_by(nac) %>%
+  mutate(porcentaje = round(n / sum(n) * 100, 1)) %>%
+  ungroup() %>%
+  ggplot(aes(x    = reorder(nac, porcentaje),
+             y    = porcentaje,
+             fill = q7_estudios)) +
+  geom_col(position = "stack") +
+  scale_fill_manual(
+    values = paletteer_c("ggthemes::Orange-Gold",
+                         length(unique(na.omit(encuesta_clean$q7_estudios)))),
+    guide  = guide_legend(reverse = TRUE)
+  ) +
+  coord_flip() +
+  labs(
+    title   = "Nivel educativo por nac",
+    x       = NULL, y = "%", fill = "Nivel educativo",
+    caption = "Datos ponderados. Encuesta trayectorias sociolaborales AMBA."
+  ) +
+  theme_minimal(base_size = 12)
+```
+
+## 5.4 Sexo por nac
+
+```{r sexo-nac}
+encuesta_clean %>%
+  filter(!is.na(nac), !is.na(sexo)) %>%
+  group_by(nac, sexo) %>%
+  summarise(n = sum(weightvec), .groups = "drop") %>%
+  group_by(nac) %>%
+  mutate(porcentaje = round(n / sum(n) * 100, 1)) %>%
+  ungroup() %>%
+  ggplot(aes(x    = reorder(nac, porcentaje),
+             y    = porcentaje,
+             fill = sexo)) +
+  geom_col(position = "stack") +
+  scale_fill_manual(
+    values = paletteer_c("ggthemes::Orange-Gold", length(unique(na.omit(encuesta_clean$sexo)))),
+    guide  = guide_legend(reverse = TRUE)
+  ) +
+  coord_flip() +
+  labs(
+    title   = "Distribución por sexo y nac",
+    x       = NULL, y = "%", fill = "Sexo",
+    caption = "Datos ponderados. Encuesta trayectorias sociolaborales AMBA."
+  ) +
+  theme_minimal(base_size = 12)
+```
+
+---
+
+*Encuesta sobre trayectorias sociolaborales de personas migrantes en AMBA — Universidad de Tübingen / UNSAM*
