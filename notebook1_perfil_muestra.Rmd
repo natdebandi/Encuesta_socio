@@ -141,19 +141,20 @@ encuesta_clean %>%
 La "Diferencia" es interpretable como el efecto que tuvo la ponderación sobre cada nacionalidad, en el caso de Venezuela bajó considerablemente su representatividad; mientras que la de Paraguay y "otros" se vio aumentada. 
 
 ```{r tabla-nac}
-treemap_data %>%
-  arrange(desc(n_sin_ponderar)) %>%
-  mutate(diferencia = round(pct_ponderado - pct_sin_ponderar, 1)) %>%
-  select(
-    Nacionalidad     = nac,
-    `N sin ponderar`              = n_sin_ponderar,
-    `% sin ponderar` = pct_sin_ponderar,
-    `% ponderado`    = pct_ponderado,
-    `Diferencia`     = diferencia
+treemap_data <- encuesta_clean %>%
+  filter(!is.na(nac)) %>%
+  group_by(nac) %>%
+  summarise(
+    n_sin_ponderar = n(),
+    n_ponderado    = sum(weightvec)
+  ) %>%
+  mutate(
+    pct_sin_ponderar = round(n_sin_ponderar / sum(n_sin_ponderar) * 100, 1),
+    pct_ponderado    = round(n_ponderado    / sum(n_ponderado)    * 100, 1)
   )
+
+colores_tm <- paletteer_c("ggthemes::Orange-Gold", nrow(treemap_data))
 ```
-
-
 
 ## 3.1 Treemap — Sin ponderar
 
@@ -391,6 +392,7 @@ Se observa que la encuesta fue respondida en mayor proporción por personas con 
 
 
 ## 4.5 Situación documentaria
+Tabla univariada de la situación documentaria. El impacto de la ponderación es relativamente bajo comparado con otras variables.
 
 ```{r}
 encuesta_clean %>%
@@ -463,22 +465,79 @@ encuesta_clean %>%
 encuesta_clean %>%
   filter(!is.na(q9_hijos_menores)) %>%
   group_by(q9_hijos_menores) %>%
-  summarise(n = sum(weightvec)) %>%
-  mutate(
-    porcentaje       = round(n / sum(n) * 100, 1),
-    q9_hijos_menores = recode(q9_hijos_menores, "si" = "Sí", "no" = "No")
+  summarise(
+    n_sin_ponderar = n(),
+    n_ponderado    = sum(weightvec)
   ) %>%
-  arrange(desc(porcentaje)) %>%
-  select(`Hijos menores de 18` = q9_hijos_menores, `%` = porcentaje)
+  mutate(
+    `% sin ponderar`  = round(n_sin_ponderar / sum(n_sin_ponderar) * 100, 1),
+    `% ponderado`     = round(n_ponderado    / sum(n_ponderado)    * 100, 1),
+    Diferencia        = round(`% ponderado` - `% sin ponderar`, 1),
+    q9_hijos_menores  = recode(q9_hijos_menores, "si" = "Si", "no" = "No")
+  ) %>%
+  arrange(desc(n_sin_ponderar)) %>%
+  select(
+    `Hijos menores de 18` = q9_hijos_menores,
+    `N`                   = n_sin_ponderar,
+    `% sin ponderar`,
+    `% ponderado`,
+    Diferencia
+  )
 ```
+
+## 4.7 Residencia de hijos menores
+Pregunta sobre la residencia de los hijos menores, solo realizada a quienes respondieron "Si" en la anterior.
+```{r hijos-menores-residencia}
+encuesta_clean %>%
+  filter(q9_hijos_menores == "si", !is.na(q10_hijos_menores_residencia)) %>%
+  group_by(q10_hijos_menores_residencia) %>%
+  summarise(
+    n_sin_ponderar = n(),
+    n_ponderado    = sum(weightvec)
+  ) %>%
+  mutate(
+    `% sin ponderar` = round(n_sin_ponderar / sum(n_sin_ponderar) * 100, 1),
+    `% ponderado`    = round(n_ponderado    / sum(n_ponderado)    * 100, 1),
+    Diferencia       = round(`% ponderado` - `% sin ponderar`, 1),
+    q10_hijos_menores_residencia = recode(q10_hijos_menores_residencia,
+      "argentina" = "En Argentina",
+      "otro_pais" = "En otro pais",
+      "ambos"     = "En Argentina y en otro pais"
+    )
+  ) %>%
+  arrange(desc(n_sin_ponderar)) %>%
+  select(
+    `Residencia de hijos menores` = q10_hijos_menores_residencia,
+    `N`                           = n_sin_ponderar,
+    `% sin ponderar`,
+    `% ponderado`,
+    Diferencia
+  )
+```
+
 
 ---
 
 # 5. Análisis bivariado
 
-## 5.1 Grupos etarios por nac
+## 5.1 Grupos etarios por nacionalidad
+Según las decisiones de calibración, Venezuela y Uruguay fueron agrupados en el rango etario de 18 a 35 por no presentar casos entre 18-24.
 
 ```{r edad-nac}
+encuesta_clean %>%
+  filter(!is.na(nac), !is.na(edad_agrupada)) %>%
+  group_by(nac, edad_agrupada) %>%
+  summarise(n = sum(weightvec), .groups = "drop") %>%
+  group_by(nac) %>%
+  mutate(porcentaje = round(n / sum(n) * 100, 1)) %>%
+  ungroup() %>%
+  mutate(edad_agrupada = factor(edad_agrupada,
+                                levels = c("18-24","25-35","36-55","56-64","65-100"))) %>%
+  select(Nacionalidad = nac, `Grupo etario` = edad_agrupada, `%` = porcentaje) %>%
+  pivot_wider(names_from = `Grupo etario`, values_from = `%`) %>%
+  arrange(Nacionalidad) %>%
+  select(Nacionalidad, `18-24`, `25-35`, `36-55`, `56-64`, `65-100`)
+
 encuesta_clean %>%
   filter(!is.na(nac), !is.na(edad_agrupada)) %>%
   group_by(nac, edad_agrupada) %>%
@@ -500,14 +559,32 @@ encuesta_clean %>%
   labs(
     title   = "Distribución de grupos etarios por nac",
     x       = NULL, y = "%", fill = "Grupo etario",
-    caption = "Datos ponderados. Nota: Venezuela presenta una concentración marcada en el segmento 18-35 años.\nEncuesta trayectorias sociolaborales AMBA."
+    caption = "Datos ponderados.\nEncuesta trayectorias sociolaborales AMBA."
   ) +
   theme_minimal(base_size = 12)
 ```
 
-## 5.2 Distribución territorial por nac
+## 5.2 Distribución territorial por nacionalidad
 
 ```{r zona-nac}
+encuesta_clean %>%
+  filter(!is.na(nac), !is.na(zona)) %>%
+  group_by(nac, zona) %>%
+  summarise(n = sum(weightvec), .groups = "drop") %>%
+  group_by(nac) %>%
+  mutate(porcentaje = round(n / sum(n) * 100, 1)) %>%
+  ungroup() %>%
+  mutate(zona = recode(zona,
+    "zona_caba"  = "CABA",
+    "zona_norte" = "Zona Norte",
+    "zona_oeste" = "Zona Oeste",
+    "zona_sur"   = "Zona Sur"
+  )) %>%
+  select(Nacionalidad = nac, Zona = zona, `%` = porcentaje) %>%
+  pivot_wider(names_from = Zona, values_from = `%`) %>%
+  arrange(Nacionalidad) %>%
+  select(Nacionalidad, CABA, `Zona Norte`, `Zona Oeste`, `Zona Sur`)
+
 encuesta_clean %>%
   filter(!is.na(nac), !is.na(zona)) %>%
   group_by(nac, zona) %>%
@@ -531,14 +608,14 @@ encuesta_clean %>%
   ) +
   coord_flip() +
   labs(
-    title   = "Distribución territorial por nac",
+    title   = "Distribución territorial por nacionalidad",
     x       = NULL, y = "%", fill = "Zona",
     caption = "Datos ponderados. Encuesta trayectorias sociolaborales AMBA."
   ) +
   theme_minimal(base_size = 12)
 ```
 
-## 5.3 Nivel educativo por nac
+## 5.3 Nivel educativo por nacionalidad
 
 ```{r educacion-nac}
 encuesta_clean %>%
@@ -548,6 +625,75 @@ encuesta_clean %>%
   group_by(nac) %>%
   mutate(porcentaje = round(n / sum(n) * 100, 1)) %>%
   ungroup() %>%
+  mutate(q7_estudios = recode(q7_estudios,
+    "sin_estudios"             = "Sin estudios",
+    "primario_incompleto"      = "Primario incompleto",
+    "primario_completo"        = "Primario completo",
+    "secundario_incompleto"    = "Secundario incompleto",
+    "secundario_completo"      = "Secundario completo",
+    "terciario_incompleto"     = "Terciario incompleto",
+    "terciario_completo"       = "Terciario completo",
+    "universitario_incompleto" = "Universitario incompleto",
+    "universitario_completo"   = "Universitario completo",
+    "posgrado_incompleto"      = "Posgrado incompleto",
+    "posgrado_completo"        = "Posgrado completo",
+    "prefiero_no_responder"    = "Prefiero no responder"
+  )) %>%
+  mutate(q7_estudios = factor(q7_estudios, levels = c(
+    "Sin estudios",
+    "Primario incompleto",
+    "Primario completo",
+    "Secundario incompleto",
+    "Secundario completo",
+    "Terciario incompleto",
+    "Terciario completo",
+    "Universitario incompleto",
+    "Universitario completo",
+    "Posgrado incompleto",
+    "Posgrado completo",
+    "Prefiero no responder"
+  ))) %>%
+  select(`Nivel educativo` = q7_estudios, Nacionalidad = nac, `%` = porcentaje) %>%
+  pivot_wider(names_from = Nacionalidad, values_from = `%`) %>%
+  arrange(`Nivel educativo`)
+
+
+
+encuesta_clean %>%
+  filter(!is.na(nac), !is.na(q7_estudios)) %>%
+  group_by(nac, q7_estudios) %>%
+  summarise(n = sum(weightvec), .groups = "drop") %>%
+  group_by(nac) %>%
+  mutate(porcentaje = round(n / sum(n) * 100, 1)) %>%
+  ungroup() %>%
+  mutate(q7_estudios = recode(q7_estudios,
+    "sin_estudios"             = "Sin estudios",
+    "primario_incompleto"      = "Primario incompleto",
+    "primario_completo"        = "Primario completo",
+    "secundario_incompleto"    = "Secundario incompleto",
+    "secundario_completo"      = "Secundario completo",
+    "terciario_incompleto"     = "Terciario incompleto",
+    "terciario_completo"       = "Terciario completo",
+    "universitario_incompleto" = "Universitario incompleto",
+    "universitario_completo"   = "Universitario completo",
+    "posgrado_incompleto"      = "Posgrado incompleto",
+    "posgrado_completo"        = "Posgrado completo",
+    "prefiero_no_responder"    = "Prefiero no responder"
+  )) %>%
+  mutate(q7_estudios = factor(q7_estudios, levels = c(
+    "Prefiero no responder",
+    "Posgrado completo",
+    "Posgrado incompleto",
+    "Universitario completo",
+    "Universitario incompleto",
+    "Terciario completo",
+    "Terciario incompleto",
+    "Secundario completo",
+    "Secundario incompleto",
+    "Primario completo",
+    "Primario incompleto",
+    "Sin estudios"
+  ))) %>%
   ggplot(aes(x    = reorder(nac, porcentaje),
              y    = porcentaje,
              fill = q7_estudios)) +
@@ -559,16 +705,123 @@ encuesta_clean %>%
   ) +
   coord_flip() +
   labs(
-    title   = "Nivel educativo por nac",
+    title   = "Nivel educativo por nacionalidad",
+    x       = NULL, y = "%", fill = "Nivel educativo",
+    caption = "Datos ponderados. Encuesta trayectorias sociolaborales AMBA."
+  ) +
+  theme_minimal(base_size = 12)
+
+# Gráfico por nacionalidad — nivel educativo agrupado
+encuesta_clean %>%
+  filter(!is.na(nac), !is.na(q7_estudios_grupo)) %>%
+  group_by(nac, q7_estudios_grupo) %>%
+  summarise(n = sum(weightvec), .groups = "drop") %>%
+  group_by(nac) %>%
+  mutate(porcentaje = round(n / sum(n) * 100, 1)) %>%
+  ungroup() %>%
+  ggplot(aes(x    = reorder(nac, porcentaje),
+             y    = porcentaje,
+             fill = fct_rev(q7_estudios_grupo))) +
+  geom_col(position = "stack") +
+  scale_fill_manual(
+    values = paletteer_c("ggthemes::Orange-Gold", 5),
+    guide  = guide_legend(reverse = TRUE)
+  ) +
+  coord_flip() +
+  labs(
+    title   = "Nivel educativo agrupado por nacionalidad",
+    x       = NULL, y = "%", fill = "Nivel educativo",
+    caption = "Datos ponderados. Encuesta trayectorias sociolaborales AMBA."
+  ) +
+  theme_minimal(base_size = 12)
+
+```
+
+## 5.4 Nivel educativo por Sexo
+```{r}
+encuesta_clean %>%
+  filter(!is.na(sexo), !is.na(q7_estudios)) %>%
+  group_by(sexo, q7_estudios) %>%
+  summarise(n = sum(weightvec), .groups = "drop") %>%
+  group_by(sexo) %>%
+  mutate(porcentaje = round(n / sum(n) * 100, 1)) %>%
+  ungroup() %>%
+  mutate(q7_estudios = recode(q7_estudios,
+    "sin_estudios"             = "Sin estudios",
+    "primario_incompleto"      = "Primario incompleto",
+    "primario_completo"        = "Primario completo",
+    "secundario_incompleto"    = "Secundario incompleto",
+    "secundario_completo"      = "Secundario completo",
+    "terciario_incompleto"     = "Terciario incompleto",
+    "terciario_completo"       = "Terciario completo",
+    "universitario_incompleto" = "Universitario incompleto",
+    "universitario_completo"   = "Universitario completo",
+    "posgrado_incompleto"      = "Posgrado incompleto",
+    "posgrado_completo"        = "Posgrado completo",
+    "prefiero_no_responder"    = "Prefiero no responder"
+  )) %>%
+  mutate(q7_estudios = factor(q7_estudios, levels = c(
+    "Sin estudios",
+    "Primario incompleto",
+    "Primario completo",
+    "Secundario incompleto",
+    "Secundario completo",
+    "Terciario incompleto",
+    "Terciario completo",
+    "Universitario incompleto",
+    "Universitario completo",
+    "Posgrado incompleto",
+    "Posgrado completo",
+    "Prefiero no responder"
+  ))) %>%
+  select(`Nivel educativo` = q7_estudios, Sexo = sexo, `%` = porcentaje) %>%
+  pivot_wider(names_from = Sexo, values_from = `%`) %>%
+  arrange(`Nivel educativo`) %>%
+  select(`Nivel educativo`, mujer, varón, otro)
+
+# Gráfico por sexo — nivel educativo agrupado
+encuesta_clean %>%
+  filter(!is.na(sexo), !is.na(q7_estudios_grupo)) %>%
+  group_by(sexo, q7_estudios_grupo) %>%
+  summarise(n = sum(weightvec), .groups = "drop") %>%
+  group_by(sexo) %>%
+  mutate(porcentaje = round(n / sum(n) * 100, 1)) %>%
+  ungroup() %>%
+  ggplot(aes(x    = sexo,
+             y    = porcentaje,
+             fill = fct_rev(q7_estudios_grupo))) +
+  geom_col(position = "stack") +
+  scale_fill_manual(
+    values = paletteer_c("ggthemes::Orange-Gold", 5),
+    guide  = guide_legend(reverse = TRUE)
+  ) +
+  coord_flip() +
+  labs(
+    title   = "Nivel educativo agrupado por sexo",
     x       = NULL, y = "%", fill = "Nivel educativo",
     caption = "Datos ponderados. Encuesta trayectorias sociolaborales AMBA."
   ) +
   theme_minimal(base_size = 12)
 ```
 
-## 5.4 Sexo por nac
+
+
+
+## 5.5 Sexo y nacionalidad
 
 ```{r sexo-nac}
+encuesta_clean %>%
+  filter(!is.na(nac), !is.na(sexo)) %>%
+  group_by(nac, sexo) %>%
+  summarise(n = sum(weightvec), .groups = "drop") %>%
+  group_by(nac) %>%
+  mutate(porcentaje = round(n / sum(n) * 100, 1)) %>%
+  ungroup() %>%
+  select(Nacionalidad = nac, Sexo = sexo, `%` = porcentaje) %>%
+  pivot_wider(names_from = Sexo, values_from = `%`) %>%
+  arrange(Nacionalidad) %>%
+  select(Nacionalidad, mujer, varón, otro)
+
 encuesta_clean %>%
   filter(!is.na(nac), !is.na(sexo)) %>%
   group_by(nac, sexo) %>%
@@ -591,6 +844,92 @@ encuesta_clean %>%
     caption = "Datos ponderados. Encuesta trayectorias sociolaborales AMBA."
   ) +
   theme_minimal(base_size = 12)
+
+```
+
+## 5.6 Situación documentaria por nacionalidad
+
+```{r}
+encuesta_clean %>%
+  filter(!is.na(nac), !is.na(q6_situacion_documentaria)) %>%
+  group_by(nac, q6_situacion_documentaria) %>%
+  summarise(n = sum(weightvec), .groups = "drop") %>%
+  group_by(nac) %>%
+  mutate(porcentaje = round(n / sum(n) * 100, 1)) %>%
+  ungroup() %>%
+  mutate(q6_situacion_documentaria = recode(q6_situacion_documentaria,
+    "rsidencia_permanente"  = "Residencia permanente",
+    "naturalizado"          = "Naturalizado/a",
+    "residencia_temporaria" = "Residencia temporaria",
+    "precaria_vigente"      = "Precaria vigente",
+    "precaria_vencida"      = "Precaria vencida",
+    "sin_dni"               = "Sin DNI",
+    "otra"                  = "Otra"
+  )) %>%
+  select(Nacionalidad = nac, `Situación documentaria` = q6_situacion_documentaria, `%` = porcentaje) %>%
+  pivot_wider(names_from = `Situación documentaria`, values_from = `%`) %>%
+  arrange(desc(`Residencia permanente`)) %>%
+  select(Nacionalidad, `Residencia permanente`, `Naturalizado/a`,
+         `Residencia temporaria`, `Precaria vigente`,
+         `Precaria vencida`, `Sin DNI`, `Otra`)
+```
+
+## 5.7 Situación documentaria por Sexo
+
+```{r}
+encuesta_clean %>%
+  filter(!is.na(sexo), !is.na(q6_situacion_documentaria)) %>%
+  group_by(sexo, q6_situacion_documentaria) %>%
+  summarise(n = sum(weightvec), .groups = "drop") %>%
+  group_by(sexo) %>%
+  mutate(porcentaje = round(n / sum(n) * 100, 1)) %>%
+  ungroup() %>%
+  mutate(q6_situacion_documentaria = recode(q6_situacion_documentaria,
+    "rsidencia_permanente"  = "Residencia permanente",
+    "naturalizado"          = "Naturalizado/a",
+    "residencia_temporaria" = "Residencia temporaria",
+    "precaria_vigente"      = "Precaria vigente",
+    "precaria_vencida"      = "Precaria vencida",
+    "sin_dni"               = "Sin DNI",
+    "otra"                  = "Otra"
+  )) %>%
+  select(Sexo = sexo, `Situación documentaria` = q6_situacion_documentaria, `%` = porcentaje) %>%
+  pivot_wider(names_from = `Situación documentaria`, values_from = `%`) %>%
+  arrange(Sexo) %>%
+  select(Sexo, `Residencia permanente`, `Naturalizado/a`,
+         `Residencia temporaria`, `Precaria vigente`,
+         `Precaria vencida`, `Sin DNI`, `Otra`) %>%
+  slice(match(c("mujer", "varón", "otro"), Sexo))
+```
+
+## 5.8 Situación documentaria por Estudios (agrupado)
+```{r}
+encuesta_clean %>%
+  filter(!is.na(q6_situacion_documentaria), !is.na(q7_estudios_grupo)) %>%
+  group_by(q6_situacion_documentaria, q7_estudios_grupo) %>%
+  summarise(n = sum(weightvec), .groups = "drop") %>%
+  group_by(q6_situacion_documentaria) %>%
+  mutate(porcentaje = round(n / sum(n) * 100, 1)) %>%
+  ungroup() %>%
+  mutate(q6_situacion_documentaria = recode(q6_situacion_documentaria,
+    "rsidencia_permanente"  = "Residencia permanente",
+    "naturalizado"          = "Naturalizado/a",
+    "residencia_temporaria" = "Residencia temporaria",
+    "precaria_vigente"      = "Precaria vigente",
+    "precaria_vencida"      = "Precaria vencida",
+    "sin_dni"               = "Sin DNI",
+    "otra"                  = "Otra"
+  )) %>%
+  select(`Situacion documentaria` = q6_situacion_documentaria,
+         `Nivel educativo`        = q7_estudios_grupo,
+         `%`                      = porcentaje) %>%
+  pivot_wider(names_from = `Nivel educativo`, values_from = `%`) %>%
+  select(`Situacion documentaria`,
+         `Sin estudios`,
+         `Hasta primario completo`,
+         `Hasta secundario completo`,
+         `Hasta terciario completo`,
+         `Universitario y posgrado`) %>% arrange()
 ```
 
 ---
