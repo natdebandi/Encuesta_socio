@@ -1,0 +1,1097 @@
+---
+title: "Análisis univariado completo"
+author: "Universidad de Tübingen / UNSAM"
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    toc: true
+    toc_depth: '3'
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    theme: flatly
+    highlight: tango
+    df_print: kable
+subtitle: Encuesta sobre trayectorias sociolaborales de personas migrantes en AMBA
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo=FALSE, warning=FALSE, message=FALSE, fig.width=9, fig.height=5.5)
+```
+
+```{r librerias}
+library(tidyverse)
+library(readr)
+library(tidytext)
+```
+
+```{r carga-y-limpieza}
+encuesta <- read_csv(
+  "data/Trayectorias laborales vf kobo weightvec v3.csv",
+  locale = locale(encoding = "UTF-8"),
+  show_col_types = FALSE
+)
+
+encuesta_clean <- encuesta %>%
+  select(
+    -`q40_estudios/s__estudios_de_nivel_primario`,
+    -`q40_estudios/s__estudios_de_nivel_secundario`,
+    -`q40_estudios/s__estudios_de_nivel_terciario__institut`,
+    -`q40_estudios/s__estudios_universitarios__carrera_de_g`,
+    -`q40_estudios/s__estudios_de_postgrado`,
+    -`q40_estudios/s__capacitaciones_laborales_profesionale`,
+    -`q40_estudios/no__no_estudi__desde_que_llegu__a_argent`,
+    -`...1`, -`__version__`, -`_tags`, -`_index`,
+    -start, -end
+  ) %>%
+  # CORRECCION q12_anio_salida:
+  # 219->2019, 2995->1995, 28->2018, 210->2010: errores tipograficos
+  # 19->2006, 20->2006: registro edad al salir en lugar del anio
+  # 1, 18, 22, 1918 -> NA: irrecuperables
+  mutate(q12_anio_salida = case_when(
+    q12_anio_salida == 219  ~ 2019,
+    q12_anio_salida == 2995 ~ 1995,
+    q12_anio_salida == 28   ~ 2018,
+    q12_anio_salida == 210  ~ 2010,
+    q12_anio_salida == 19   ~ 2006,
+    q12_anio_salida == 20   ~ 2006,
+    q12_anio_salida == 1949 ~ 1949,
+    q12_anio_salida %in% c(1, 18, 22, 1918) ~ NA_real_,
+    TRUE ~ q12_anio_salida
+  )) %>%
+  # CORRECCION q19_anio_arribo:
+  # 21->2004: registro edad al llegar, coherente con q12
+  # 18, 1918 -> NA: irrecuperables
+  mutate(q19_anio_arribo = case_when(
+    q19_anio_arribo == 21             ~ 2004,
+    q19_anio_arribo %in% c(18, 1918) ~ NA_real_,
+    TRUE                              ~ q19_anio_arribo
+  )) %>%
+  # CORRECCION q34_trabajos_cantidad:
+  # >= 5 o < 1 -> NA: posible confusion con edad o anios de antiguedad
+  # Decision de imputacion pendiente de validacion con el equipo
+  mutate(q34_trabajos_cantidad = case_when(
+    q34_trabajos_cantidad >= 5 | q34_trabajos_cantidad < 1 ~ NA_real_,
+    TRUE ~ q34_trabajos_cantidad
+  ))
+
+total_pesos <- sum(encuesta_clean$weightvec)
+
+# Agrupacion nivel educativo
+encuesta_clean <- encuesta_clean %>%
+  mutate(q7_estudios_grupo = case_when(
+    q7_estudios == "sin_estudios"                                      ~ "Sin estudios",
+    q7_estudios %in% c("primario_incompleto", "primario_completo")     ~ "Hasta primario completo",
+    q7_estudios %in% c("secundario_incompleto", "secundario_completo") ~ "Hasta secundario completo",
+    q7_estudios %in% c("terciario_incompleto", "terciario_completo")   ~ "Hasta terciario completo",
+    q7_estudios %in% c("universitario_incompleto", "universitario_completo",
+                       "posgrado_incompleto", "posgrado_completo")     ~ "Universitario y posgrado",
+    TRUE ~ NA_character_
+  ) %>%
+  factor(levels = c("Sin estudios","Hasta primario completo",
+                    "Hasta secundario completo","Hasta terciario completo",
+                    "Universitario y posgrado")))
+
+# Submuestra Momento 2
+encuesta_momento2 <- encuesta_clean %>% filter(q19_anio_arribo < 2024)
+
+# Stopwords para texto libre
+stopwords_es <- c(
+  "de","en","la","el","los","las","un","una","y","a","por","con","del","al",
+  "se","su","que","o","para","pero","como","mas","este","esta","esto","entre",
+  "hasta","desde","trabajo","trabajaba","trabaje","sector","area","empresa","famili"
+)
+
+encuesta_clean <- encuesta_clean %>%
+  mutate(q7_estudios = factor(q7_estudios, levels = c(
+    "sin_estudios",
+    "primario_incompleto",
+    "primario_completo",
+    "secundario_incompleto",
+    "secundario_completo",
+    "terciario_incompleto",
+    "terciario_completo",
+    "universitario_incompleto",
+    "universitario_completo",
+    "posgrado_incompleto",
+    "posgrado_completo",
+    "prefiero_no_responder"
+  )))
+
+
+encuesta_clean <- encuesta_clean %>%
+  mutate(q7_estudios_grupo2 = case_when(
+    q7_estudios %in% c("sin_estudios",
+                       "primario_incompleto",
+                       "primario_completo",
+                       "secundario_incompleto")          ~ "Hasta secundario incompleto",
+    q7_estudios %in% c("secundario_completo",
+                       "terciario_incompleto",
+                       "universitario_incompleto")       ~ "Secundario completo",
+    q7_estudios %in% c("terciario_completo",
+                       "universitario_completo",
+                       "posgrado_incompleto",
+                       "posgrado_completo")              ~ "Superior o universitario completo y mas",
+    q7_estudios == "prefiero_no_responder"               ~ "Prefiero no responder",
+    TRUE ~ NA_character_
+  ) %>%
+  factor(levels = c("Hasta secundario incompleto",
+                    "Secundario completo",
+                    "Superior o universitario completo y mas",
+                    "Prefiero no responder")))
+
+
+
+# Funcion auxiliar para calcular % ponderado sobre subconjunto
+pct_pond <- function(sub_pesos, total) round(sum(sub_pesos) / total * 100, 1)
+```
+
+---
+
+# 1. Descripción del proyecto
+
+Esta encuesta releva trayectorias sociolaborales de personas migrantes residentes en el Area Metropolitana de Buenos Aires (AMBA), en el marco de una colaboración entre la Universidad de Tubingen y la UNSAM. La muestra cuenta con **`r nrow(encuesta_clean)` casos** con pesos muestrales calibrados segun el Censo Nacional de Poblacion 2022.
+
+El cuestionario esta organizado en tres momentos: **país de origen**, **primer año en Argentina** y **situación actual**.
+
+---
+
+# 2. Variables sociodemograficas
+
+## 2.1 Q1 — Edad (agrupada)
+
+```{r q1}
+encuesta_clean %>%
+  filter(!is.na(edad_agrupada)) %>%
+  group_by(edad_agrupada) %>%
+  summarise(N = n(), `% ponderado` = round(sum(weightvec) / sum(encuesta_clean$weightvec[!is.na(encuesta_clean$edad_agrupada)]) * 100, 1)) %>%
+  select(`Grupo etario` = edad_agrupada, N, `% ponderado`)
+```
+
+## 2.2 Q2 — Nacionalidad (variable nac agrupada)
+
+```{r q2}
+encuesta_clean %>%
+  filter(!is.na(nac)) %>%
+  group_by(nac) %>%
+  summarise(N = n(), `% ponderado` = round(sum(weightvec) / sum(encuesta_clean$weightvec[!is.na(encuesta_clean$nac)]) * 100, 1)) %>%
+  arrange(desc(N)) %>%
+  select(Nacionalidad = nac, N, `% ponderado`)
+```
+
+## 2.3 Q3 — Sexo
+
+```{r q3}
+encuesta_clean %>%
+  filter(!is.na(sexo)) %>%
+  group_by(sexo) %>%
+  summarise(N = n(), `% ponderado` = round(sum(weightvec) / sum(encuesta_clean$weightvec[!is.na(encuesta_clean$sexo)]) * 100, 1)) %>%
+  arrange(desc(N)) %>%
+  select(Sexo = sexo, N, `% ponderado`)
+```
+
+## 2.4 Q4 — Provincia de residencia
+En la ponderación se excluyeron algunos casos pertenecientes a otras provincias.
+
+```{r q4}
+encuesta_clean %>%
+  filter(!is.na(provincia)) %>%
+  group_by(provincia) %>%
+  summarise(N = n(), `% ponderado` = round(sum(weightvec) / sum(encuesta_clean$weightvec[!is.na(encuesta_clean$provincia)]) * 100, 1)) %>%
+  arrange(desc(N)) %>%
+  select(Provincia = provincia, N, `% ponderado`)
+```
+
+## 2.5 Zona de residencia (variable recodificada)
+
+```{r zona}
+encuesta_clean %>%
+  filter(!is.na(zona)) %>%
+  group_by(zona) %>%
+  summarise(N = n(), `% ponderado` = round(sum(weightvec) / sum(encuesta_clean$weightvec[!is.na(encuesta_clean$zona)]) * 100, 1)) %>%
+  arrange(desc(N)) %>%
+  select(Zona = zona, N, `% ponderado`)
+```
+
+## 2.6 Q6 — Situación documentaria
+
+```{r q6}
+encuesta_clean %>%
+  filter(!is.na(q6_situacion_documentaria)) %>%
+  group_by(q6_situacion_documentaria) %>%
+  summarise(N = n(), `% ponderado` = round(sum(weightvec) / sum(encuesta_clean$weightvec[!is.na(encuesta_clean$q6_situacion_documentaria)]) * 100, 1)) %>%
+  mutate(q6_situacion_documentaria = recode(q6_situacion_documentaria,
+    "rsidencia_permanente"  = "Residencia permanente",
+    "naturalizado"          = "Naturalizado/a",
+    "residencia_temporaria" = "Residencia temporaria",
+    "precaria_vigente"      = "Precaria vigente",
+    "precaria_vencida"      = "Precaria vencida",
+    "sin_dni"               = "Sin DNI",
+    "otra"                  = "Otra"
+  )) %>%
+  arrange(desc(N)) %>%
+  select(`Situacion documentaria` = q6_situacion_documentaria, N, `% ponderado`)
+```
+
+## 2.7 Q7 — Nivel educativo
+
+```{r q7}
+encuesta_clean %>%
+  filter(!is.na(q7_estudios)) %>%
+  group_by(q7_estudios) %>%
+  summarise(N = n(), `% ponderado` = round(sum(weightvec) / sum(encuesta_clean$weightvec[!is.na(encuesta_clean$q7_estudios)]) * 100, 1)) %>%
+  mutate(q7_estudios = recode(q7_estudios,
+    "sin_estudios"="Sin estudios","primario_incompleto"="Primario incompleto",
+    "primario_completo"="Primario completo","secundario_incompleto"="Secundario incompleto",
+    "secundario_completo"="Secundario completo","terciario_incompleto"="Terciario incompleto",
+    "terciario_completo"="Terciario completo","universitario_incompleto"="Universitario incompleto",
+    "universitario_completo"="Universitario completo","posgrado_incompleto"="Posgrado incompleto",
+    "posgrado_completo"="Posgrado completo","prefiero_no_responder"="Prefiero no responder"
+  )) %>%
+  arrange(q7_estudios
+          ) %>%
+  select(`Nivel educativo` = q7_estudios, N, `% ponderado`)
+```
+
+## 2.8 Q7 — Nivel educativo agrupado
+Se utiliza la agrupación de la ENMA 2023.
+```{r q7-agrupado}
+encuesta_clean %>%
+  filter(!is.na(q7_estudios_grupo2)) %>%
+  group_by(q7_estudios_grupo2) %>%
+  summarise(N = n(), `% ponderado` = round(sum(weightvec) / sum(encuesta_clean$weightvec[!is.na(encuesta_clean$q7_estudios_grupo2)]) * 100, 1)) %>%
+  arrange(q7_estudios_grupo2) %>%
+  select(`Nivel educativo` = q7_estudios_grupo2, N, `% ponderado`)
+```
+
+## 2.9 Q8 — Convivencia en pareja
+
+```{r q8}
+encuesta_clean %>%
+  filter(!is.na(q8_hogar_convivencia)) %>%
+  group_by(q8_hogar_convivencia) %>%
+  summarise(N = n(), `% ponderado` = round(sum(weightvec) / sum(encuesta_clean$weightvec[!is.na(encuesta_clean$q8_hogar_convivencia)]) * 100, 1)) %>%
+  mutate(q8_hogar_convivencia = recode(q8_hogar_convivencia,
+    "si_nacida_argentina"="Si, con persona nacida en Argentina",
+    "si_nacida_extranjero"="Si, con persona nacida en otro pais",
+    "sin_conyugue"="Sin conyuge o pareja",
+    "prefiero_no_responder"="Prefiero no responder"
+  )) %>%
+  arrange(desc(N)) %>%
+  select(Convivencia = q8_hogar_convivencia, N, `% ponderado`)
+```
+
+## 2.10 Q9 — Hijos menores de 18
+
+```{r q9}
+encuesta_clean %>%
+  filter(!is.na(q9_hijos_menores)) %>%
+  group_by(q9_hijos_menores) %>%
+  summarise(N = n(), `% ponderado` = round(sum(weightvec) / sum(encuesta_clean$weightvec[!is.na(encuesta_clean$q9_hijos_menores)]) * 100, 1)) %>%
+  mutate(q9_hijos_menores = recode(q9_hijos_menores, "si"="Si","no"="No")) %>%
+  arrange(desc(N)) %>%
+  select(`Hijos menores de 18` = q9_hijos_menores, N, `% ponderado`)
+```
+
+## 2.11 Q10 — Residencia de hijos menores
+
+Solo quienes tienen hijos menores (Q9 = "si").
+
+```{r q10}
+sub <- encuesta_clean %>% filter(q9_hijos_menores == "si", !is.na(q10_hijos_menores_residencia))
+encuesta_clean %>%
+  filter(q9_hijos_menores == "si", !is.na(q10_hijos_menores_residencia)) %>%
+  group_by(q10_hijos_menores_residencia) %>%
+  summarise(N = n(), `% ponderado` = round(sum(weightvec) / sum(sub$weightvec) * 100, 1)) %>%
+  mutate(q10_hijos_menores_residencia = recode(q10_hijos_menores_residencia,
+    "argentina"="En Argentina","otro_pais"="En otro pais","ambos"="En Argentina y en otro pais"
+  )) %>%
+  arrange(desc(N)) %>%
+  select(`Residencia de hijos menores` = q10_hijos_menores_residencia, N, `% ponderado`)
+```
+
+---
+
+# 3. Momento 1 — Pais de origen
+
+## 3.1 Q11 — Motivos de salida (seleccion multiple)
+
+Responde toda la muestra (N = `r nrow(encuesta_clean)`). Los porcentajes suman mas de 100% porque cada persona podia elegir multiples motivos.
+
+```{r q11}
+tibble(
+  Motivo = c(
+    "Para conseguir mejor trabajo / mejorar ingresos",
+    "Para estudiar u obtener nuevas experiencias",
+    "Vino con su familia siendo niño/a",
+    "Para reagruparse con familia",
+    "Por violencia o persecucion",
+    "Otro"
+  ),
+  N = c(
+    sum(encuesta_clean$`q11_motivos_salida/trabajo`,            na.rm=TRUE),
+    sum(encuesta_clean$`q11_motivos_salida/estudio`,            na.rm=TRUE),
+    sum(encuesta_clean$`q11_motivos_salida/migracion_familiar`, na.rm=TRUE),
+    sum(encuesta_clean$`q11_motivos_salida/reagrupación`,       na.rm=TRUE),
+    sum(encuesta_clean$`q11_motivos_salida/violencias`,         na.rm=TRUE),
+    sum(encuesta_clean$`q11_motivos_salida/otro`,               na.rm=TRUE)
+  ),
+  `% ponderado` = c(
+    round(sum(encuesta_clean$`q11_motivos_salida/trabajo`            * encuesta_clean$weightvec, na.rm=TRUE) / total_pesos * 100, 1),
+    round(sum(encuesta_clean$`q11_motivos_salida/estudio`            * encuesta_clean$weightvec, na.rm=TRUE) / total_pesos * 100, 1),
+    round(sum(encuesta_clean$`q11_motivos_salida/migracion_familiar` * encuesta_clean$weightvec, na.rm=TRUE) / total_pesos * 100, 1),
+    round(sum(encuesta_clean$`q11_motivos_salida/reagrupación`       * encuesta_clean$weightvec, na.rm=TRUE) / total_pesos * 100, 1),
+    round(sum(encuesta_clean$`q11_motivos_salida/violencias`         * encuesta_clean$weightvec, na.rm=TRUE) / total_pesos * 100, 1),
+    round(sum(encuesta_clean$`q11_motivos_salida/otro`               * encuesta_clean$weightvec, na.rm=TRUE) / total_pesos * 100, 1)
+  )
+) %>% arrange(desc(`% ponderado`))
+```
+
+## 3.2.a Q12 — Año de salida del pais de origen
+
+```{r q12}
+sub12 <- encuesta_clean %>% filter(!is.na(q12_anio_salida), q12_anio_salida >= 1950)
+sub12 %>%
+  group_by(q12_anio_salida) %>%
+  summarise(N = n(), `% ponderado` = round(sum(weightvec) / sum(sub12$weightvec) * 100, 1)) %>%
+  arrange(q12_anio_salida) %>%
+  select(`Anio de salida` = q12_anio_salida, N, `% ponderado`)
+```
+
+## 3.2.b Q12 — Año de salida del país de origen agrupado por décadas
+Se propone la agrupación por décadas.
+```{r}
+encuesta_clean <- encuesta_clean %>%
+  mutate(q12_decada_salida = case_when(
+    q12_anio_salida >= 1940 & q12_anio_salida <= 1959 ~ "1940-1959",
+    q12_anio_salida >= 1960 & q12_anio_salida <= 1969 ~ "1960-1969",
+    q12_anio_salida >= 1970 & q12_anio_salida <= 1979 ~ "1970-1979",
+    q12_anio_salida >= 1980 & q12_anio_salida <= 1989 ~ "1980-1989",
+    q12_anio_salida >= 1990 & q12_anio_salida <= 1999 ~ "1990-1999",
+    q12_anio_salida >= 2000 & q12_anio_salida <= 2009 ~ "2000-2009",
+    q12_anio_salida >= 2010 & q12_anio_salida <= 2019 ~ "2010-2019",
+    q12_anio_salida >= 2020                           ~ "2020-2025",
+    TRUE ~ NA_character_
+  ) %>%
+  factor(levels = c("1940-1959","1960-1969","1970-1979","1980-1989","1990-1999","2000-2009","2010-2019","2020-2025")))
+
+encuesta_clean %>%
+  filter(!is.na(q12_decada_salida)) %>%
+  group_by(q12_decada_salida) %>%
+  summarise(
+    N             = n(),
+    `% ponderado` = round(sum(weightvec) / sum(encuesta_clean$weightvec[!is.na(encuesta_clean$q12_decada_salida)]) * 100, 1)
+  ) %>%
+  arrange(q12_decada_salida) %>%
+  select(Decada = q12_decada_salida, N, `% ponderado`)
+```
+
+
+## 3.3 Q13 — Situación laboral antes de migrar
+
+```{r q13}
+sub13 <- encuesta_clean %>% filter(!is.na(q13_trabajo_origen))
+sub13 %>%
+  group_by(q13_trabajo_origen) %>%
+  summarise(N = n(), `% ponderado` = round(sum(weightvec) / sum(sub13$weightvec) * 100, 1)) %>%
+  mutate(q13_trabajo_origen = recode(q13_trabajo_origen,
+    "si"="Si, trabajaba","no_desempleado"="No, estaba desempleado/buscando trabajo",
+    "no_ninio"="No, era niño/a o adolescente","no_estudio"="No, solo estudiaba",
+    "no_jubilado"="No, ya estaba jubilado/retirado"
+  )) %>%
+  arrange(desc(N)) %>%
+  select(`Situacion laboral en origen` = q13_trabajo_origen, N, `% ponderado`)
+```
+
+## 3.4 Q14 — Tipo de ocupación en origen
+
+Solo quienes trabajaban en origen (Q13 = "si").
+
+```{r q14}
+sub14 <- encuesta_clean %>% filter(q13_trabajo_origen == "si", !is.na(q14_situacion_ocupacional_orig))
+sub14 %>%
+  group_by(q14_situacion_ocupacional_orig) %>%
+  summarise(N = n(), `% ponderado` = round(sum(weightvec) / sum(sub14$weightvec) * 100, 1)) %>%
+  mutate(q14_situacion_ocupacional_orig = recode(q14_situacion_ocupacional_orig,
+    "salario_fijo"="Trabajo con salario fijo","cuenta_propia"="Trabajo por cuenta propia",
+    "changas"="Trabajos esporadicos / changas","trabajo_sin_remuneracion"="Trabajo sin remuneracion",
+    "otro"="Otra"
+  )) %>%
+  arrange(desc(N)) %>%
+  select(`Situacion ocupacional en origen` = q14_situacion_ocupacional_orig, N, `% ponderado`)
+```
+
+## 3.5 Q15 — Formalidad del trabajo en país de origen
+
+Solo quienes tenian salario fijo o cuenta propia (Q14).
+
+```{r q15}
+sub15 <- encuesta_clean %>% filter(q13_trabajo_origen == "si",
+  q14_situacion_ocupacional_orig %in% c("salario_fijo","cuenta_propia"), !is.na(q15_formalidad_trabajo))
+sub15 %>%
+  group_by(q15_formalidad_trabajo) %>%
+  summarise(N = n(), `% ponderado` = round(sum(weightvec) / sum(sub15$weightvec) * 100, 1)) %>%
+  mutate(q15_formalidad_trabajo = recode(q15_formalidad_trabajo,"formal"="Formal","informal"="Informal")) %>%
+  arrange(desc(N)) %>%
+  select(`Formalidad en origen` = q15_formalidad_trabajo, N, `% ponderado`)
+```
+
+## 3.6 Q16 — Actividad laboral en origen
+
+Solo quienes trabajaban por cuenta propia o changas (Q14).
+
+```{r q16}
+sub16 <- encuesta_clean %>% filter(q13_trabajo_origen == "si",
+  q14_situacion_ocupacional_orig %in% c("cuenta_propia","changas"), !is.na(q16_actividad_origen))
+sub16 %>%
+  group_by(q16_actividad_origen) %>%
+  summarise(N = n(), `% ponderado` = round(sum(weightvec) / sum(sub16$weightvec) * 100, 1)) %>%
+  mutate(q16_actividad_origen = recode(q16_actividad_origen,
+    "patron"="Patron de un negocio (empleador)","profesional"="Profesional independiente",
+    "servicio_oficio"="Trabajo de servicio u oficio","emprendimiento"="Emprendimiento / negocio familiar",
+    "venta_ambulante"="Venta ambulante","plataforma"="Trabajo en plataformas",
+    "trabajo_estacional"="Trabajo estacional o por periodos","otro"="Otra"
+  )) %>%
+  arrange(desc(N)) %>%
+  select(`Actividad laboral en origen` = q16_actividad_origen, N, `% ponderado`)
+```
+
+## 3.7 Q17 — Ocupación en país de origen (texto libre) — Top 15 terminos
+
+```{r q17}
+encuesta_clean %>%
+  filter(!is.na(q17_ocupacion_origen)) %>%
+  select(q17_ocupacion_origen) %>%
+  unnest_tokens(word, q17_ocupacion_origen) %>%
+  filter(!word %in% stopwords_es, nchar(word) > 3) %>%
+  count(word, sort=TRUE) %>%
+  slice_max(n, n=15) %>%
+  select(Termino = word, Frecuencia = n)
+```
+
+## 3.8 Q18 — Cobertura de necesidades basicas en origen
+
+Solo quienes trabajaban en origen (Q13 = "si").
+
+```{r q18}
+sub18 <- encuesta_clean %>% filter(q13_trabajo_origen == "si", !is.na(q18_cubre_necesidades))
+sub18 %>%
+  group_by(q18_cubre_necesidades) %>%
+  summarise(N = n(), `% ponderado` = round(sum(weightvec) / sum(sub18$weightvec) * 100, 1)) %>%
+  mutate(q18_cubre_necesidades = recode(q18_cubre_necesidades,
+    "completamente"="Completamente","bastante_bien"="Bastante bien","justo"="Justo",
+    "insuficiente"="Insuficiente","muy_deficiente"="Muy deficiente"
+  )) %>%
+  arrange(desc(N)) %>%
+  select(`Cobertura de necesidades basicas en origen` = q18_cubre_necesidades, N, `% ponderado`)
+```
+
+---
+
+# 4. Cronologia migratoria
+
+## 4.1 Q19 — Año de arribo a Argentina
+Retorna a toda la muestra. **`r nrow(encuesta_clean$q19_anio_arribo)` casos**
+```{r q19}
+sub19 <- encuesta_clean %>% filter(!is.na(q19_anio_arribo))
+sub19 %>%
+  group_by(q19_anio_arribo) %>%
+  summarise(N = n(), `% ponderado` = round(sum(weightvec) / sum(sub19$weightvec) * 100, 1)) %>%
+  arrange(q19_anio_arribo) %>%
+  select(`Año de arribo` = q19_anio_arribo, N, `% ponderado`)
+```
+
+## 4.2 Q19 — Año de arribo a Argentina agrupada por décadas
+
+
+```{r}
+encuesta_clean <- encuesta_clean %>%
+  mutate(q19_decada_arribo = case_when(
+    q19_anio_arribo >= 1940 & q19_anio_arribo <= 1959 ~ "1940-1959",
+    q19_anio_arribo >= 1960 & q19_anio_arribo <= 1969 ~ "1960-1969",
+    q19_anio_arribo >= 1970 & q19_anio_arribo <= 1979 ~ "1970-1979",
+    q19_anio_arribo >= 1980 & q19_anio_arribo <= 1989 ~ "1980-1989",
+    q19_anio_arribo >= 1990 & q19_anio_arribo <= 1999 ~ "1990-1999",
+    q19_anio_arribo >= 2000 & q19_anio_arribo <= 2009 ~ "2000-2009",
+    q19_anio_arribo >= 2010 & q19_anio_arribo <= 2019 ~ "2010-2019",
+    q19_anio_arribo >= 2020                           ~ "2020-2025",
+    TRUE ~ NA_character_
+  ) %>%
+  factor(levels = c("1940-1959","1960-1969","1970-1979","1980-1989","1990-1999","2000-2009","2010-2019","2020-2025")))
+
+sub19d <- encuesta_clean %>% filter(!is.na(q19_decada_arribo))
+sub19d %>%
+  group_by(q19_decada_arribo) %>%
+  summarise(N = n(), `% ponderado` = round(sum(weightvec) / sum(sub19d$weightvec) * 100, 1)) %>%
+  arrange(q19_decada_arribo) %>%
+  select(`Decada de arribo` = q19_decada_arribo, N, `% ponderado`)
+
+```
+
+---
+
+# 5. Momento 2 — Primer año en Argentina
+
+> Este bloque incluye solo los **`r nrow(encuesta_momento2)`** casos que llegaron antes de 2024 (q19_anio_arribo < 2024).
+
+## 5.1 Q20 — DNI durante el primer año
+
+```{r q20}
+sub20 <- encuesta_momento2 %>% filter(!is.na(q20_DNI_primer_anio))
+sub20 %>%
+  group_by(q20_DNI_primer_anio) %>%
+  summarise(N = n(), `% ponderado` = round(sum(weightvec) / sum(sub20$weightvec) * 100, 1)) %>%
+  mutate(q20_DNI_primer_anio = recode(q20_DNI_primer_anio,
+    "si"="Si","no"="No","prefiero_no_responder"="Prefiero no responder / No se"
+  )) %>%
+  arrange(desc(N)) %>%
+  select(`Obtuvo DNI en el primer año` = q20_DNI_primer_anio, N, `% ponderado`)
+```
+
+## 5.2 Q21 — Situación laboral durante el primer año
+
+```{r q21}
+sub21 <- encuesta_momento2 %>% filter(!is.na(q21_trabajo_primer_anio))
+sub21 %>%
+  group_by(q21_trabajo_primer_anio) %>%
+  summarise(N = n(), `% ponderado` = round(sum(weightvec) / sum(sub21$weightvec) * 100, 1)) %>%
+  mutate(q21_trabajo_primer_anio = recode(q21_trabajo_primer_anio,
+    "si"="Si, trabajó","no_jubilado"="No, jubilado/retirado","no_estudio"="No, solo estudió",
+    "no_desempleado"="No, desempleado/buscando trabajo","no_ninio"="No, era niño/a o adolescente"
+  )) %>%
+  arrange(desc(N)) %>%
+  select(`Situacion laboral primer año` = q21_trabajo_primer_anio, N, `% ponderado`)
+```
+
+## 5.3 Q22 — Tipo de ocupacion primer año
+
+Solo quienes trabajaron en el primer año (Q21 = "si").
+
+```{r q22}
+sub22 <- encuesta_momento2 %>% filter(q21_trabajo_primer_anio == "si", !is.na(q22_ocupacion_primer_anio))
+sub22 %>%
+  group_by(q22_ocupacion_primer_anio) %>%
+  summarise(N = n(), `% ponderado` = round(sum(weightvec) / sum(sub22$weightvec) * 100, 1)) %>%
+  mutate(q22_ocupacion_primer_anio = recode(q22_ocupacion_primer_anio,
+    "salario_fijo"="Trabajo con salario fijo","cuenta_propia"="Trabajo por cuenta propia",
+    "changas"="Trabajos esporadicos / changas","trabajo_sin_remuneracion"="Trabajo sin remuneracion",
+    "otro"="Otra"
+  )) %>%
+  arrange(desc(N)) %>%
+  select(`Ocupacion primer año` = q22_ocupacion_primer_anio, N, `% ponderado`)
+```
+
+## 5.4 Q23 — Formalidad del trabajo durante el primer año
+
+Solo quienes tenían salario fijo o cuenta propia (Q22).
+
+```{r q23}
+sub23 <- encuesta_momento2 %>% filter(q21_trabajo_primer_anio == "si",
+  q22_ocupacion_primer_anio %in% c("salario_fijo","cuenta_propia"), !is.na(q23_formalidad_trabajo))
+sub23 %>%
+  group_by(q23_formalidad_trabajo) %>%
+  summarise(N = n(), `% ponderado` = round(sum(weightvec) / sum(sub23$weightvec) * 100, 1)) %>%
+  mutate(q23_formalidad_trabajo = recode(q23_formalidad_trabajo,"formal"="Formal","informal"="Informal")) %>%
+  arrange(desc(N)) %>%
+  select(`Formalidad primer año` = q23_formalidad_trabajo, N, `% ponderado`)
+```
+
+## 5.5 Q24 — Actividad laboral primer año
+
+Solo quienes trabajaban por cuenta propia o changas (Q22).
+
+```{r q24}
+sub24 <- encuesta_momento2 %>% filter(q21_trabajo_primer_anio == "si",
+  q22_ocupacion_primer_anio %in% c("cuenta_propia","changas"), !is.na(q24_actividad_primer_anio))
+sub24 %>%
+  group_by(q24_actividad_primer_anio) %>%
+  summarise(N = n(), `% ponderado` = round(sum(weightvec) / sum(sub24$weightvec) * 100, 1)) %>%
+  mutate(q24_actividad_primer_anio = recode(q24_actividad_primer_anio,
+    "patron"="Patron de un negocio (empleador)","profesional"="Profesional independiente",
+    "servicio_oficio"="Trabajo de servicio u oficio","emprendimiento"="Emprendimiento",
+    "venta_ambulante"="Venta ambulante","plataforma"="Trabajo en plataformas",
+    "trabajo_estacional"="Trabajo estacional o por periodos","otro"="Otra"
+  )) %>%
+  arrange(desc(N)) %>%
+  select(`Actividad laboral primer año` = q24_actividad_primer_anio, N, `% ponderado`)
+```
+
+## 5.6 Q25 — Ocupacion primer año (texto libre) — Top 15 terminos
+
+Solo quienes trabajaron en el primer año (Q21 = "si"). La pregunta pedía: "Describir en pocas palabras la ocupación laboral durante su primer año viviendo en Argentina." 
+```{r q25}
+encuesta_momento2 %>%
+  filter(q21_trabajo_primer_anio == "si", !is.na(q25_ocupacion_primer_anio)) %>%
+  select(q25_ocupacion_primer_anio) %>%
+  unnest_tokens(word, q25_ocupacion_primer_anio) %>%
+  filter(!word %in% stopwords_es, nchar(word) > 3) %>%
+  count(word, sort=TRUE) %>%
+  slice_max(n, n=15) %>%
+  select(Termino = word, Frecuencia = n)
+```
+
+## 5.7 Q26 — Cómo obtuvo el trabajo primer año
+
+Solo quienes trabajaron en el primer año (Q21 = "si").
+
+```{r q26}
+sub26 <- encuesta_momento2 %>% filter(q21_trabajo_primer_anio == "si", !is.na(q26_forma_obtencion))
+sub26 %>%
+  group_by(q26_forma_obtencion) %>%
+  summarise(N = n(), `% ponderado` = round(sum(weightvec) / sum(sub26$weightvec) * 100, 1)) %>%
+  mutate(q26_forma_obtencion = recode(q26_forma_obtencion,
+    "vino_con_trabajo"="Vine con trabajo desde mi país de origen",
+    "anuncios_redes"="A traves de anuncios, plataformas y redes",
+    "dejo_cv"="Deje mi curriculum y me llamaron",
+    "recomendación_familiar"="Por recomendacion de conocido, compatriota o familiar",
+    "agencia_empleo"="A traves de una oficina o agencia de empleo","otro"="Otra"
+  )) %>%
+  arrange(desc(N)) %>%
+  select(`Cómo obtuvo el trabajo` = q26_forma_obtencion, N, `% ponderado`)
+```
+
+## 5.8 Q27 — Envio de remesas primer año
+
+Responde toda la muestra del Momento 2. Se registraron `r encuesta_momento2 %>% filter(is.na(q27_remesas)) %>% nrow()` NA.
+
+```{r q27}
+sub27 <- encuesta_momento2 %>% filter(!is.na(q27_remesas))
+sub27 %>%
+  group_by(q27_remesas) %>%
+  summarise(N = n(), `% ponderado` = round(sum(weightvec) / sum(sub27$weightvec) * 100, 1)) %>%
+  mutate(q27_remesas = recode(q27_remesas,
+    "regularmente"="Si, regularmente","a_veces"="Si, de vez en cuando",
+    "no"="No","prefiero_no_responder"="Prefiero no responder"
+  )) %>%
+  arrange(desc(N)) %>%
+  select(`Envio de remesas primer año` = q27_remesas, N, `% ponderado`)
+```
+
+## 5.9 Q28 — Dificultades para acceder al trabajo primer año
+
+Aplica a quienes trabajaron, estuvieron desempleados o solo estudiaron (excluye jubilados y niños).
+
+```{r q28}
+sub28 <- encuesta_momento2 %>% filter(
+  q21_trabajo_primer_anio %in% c("si","no_desempleado","no_estudio"), !is.na(q28_dificultades_acceso))
+sub28 %>%
+  group_by(q28_dificultades_acceso) %>%
+  summarise(N = n(), `% ponderado` = round(sum(weightvec) / sum(sub28$weightvec) * 100, 1)) %>%
+  mutate(q28_dificultades_acceso = recode(q28_dificultades_acceso,
+    "si"="Si","no"="No","prefiero_no_responder"="Prefiero no responder"
+  )) %>%
+  arrange(desc(N)) %>%
+  select(`Dificultades de acceso primer año` = q28_dificultades_acceso, N, `% ponderado`)
+```
+
+## 5.10 Q29 — Principal dificultad de acceso primer año
+
+Solo quienes respondieron Si en Q28.
+El N difiere ligeramente (-4 casos) porque hubo encuestados que eligieron no responder. 
+
+```{r q29}
+sub29 <- encuesta_momento2 %>% filter(q28_dificultades_acceso == "si", !is.na(q29_tipo_dificultades_primer_a))
+sub29 %>%
+  group_by(q29_tipo_dificultades_primer_a) %>%
+  summarise(N = n(), `% ponderado` = round(sum(weightvec) / sum(sub29$weightvec) * 100, 1)) %>%
+  mutate(q29_tipo_dificultades_primer_a = recode(q29_tipo_dificultades_primer_a,
+    "homologacion_titulos"="Homologacion/reconocimiento de titulos",
+    "discriminacion"="Discriminacion por condicion de extranjero/a",
+    "documentacion"="Falta de documentacion (DNI u otros)",
+    "idioma"="Dificultades con el idioma","experiencia"="Falta de experiencia previa",
+    "poca_oferta"="Poca oferta en el rubro buscado","desinformacion"="No sabia donde buscar trabajo",
+    "prefiero_no_responder"="Prefiero no responder","otra"="Otra"
+  )) %>%
+  arrange(desc(N)) %>%
+  select(`Principal dificultad primer año` = q29_tipo_dificultades_primer_a, N, `% ponderado`)
+```
+
+> Nota: la categoria "Otra" (40 casos) esta dominada por la **edad** como barrera — hallazgo emergente no contemplado en las opciones originales.
+
+```{r q29-texto}
+encuesta_momento2 %>%
+  filter(q29_tipo_dificultades_primer_a == "otra", !is.na(q29_otras_dificultades_primer_)) %>%
+  select(q29_otras_dificultades_primer_) %>%
+  unnest_tokens(word, q29_otras_dificultades_primer_) %>%
+  filter(!word %in% stopwords_es, nchar(word) > 3) %>%
+  count(word, sort=TRUE) %>%
+  slice_max(n, n=15) %>%
+  select(Termino = word, Frecuencia = n)
+```
+
+## 5.11 Q30 — Adecuación de la actividad laboral al area de conocimiento
+
+Solo quienes trabajaron en el primer año (Q21 = "si").
+
+```{r q30}
+sub30 <- encuesta_momento2 %>% filter(q21_trabajo_primer_anio == "si", !is.na(q30_actividad_adecuada))
+sub30 %>%
+  group_by(q30_actividad_adecuada) %>%
+  summarise(N = n(), `% ponderado` = round(sum(weightvec) / sum(sub30$weightvec) * 100, 1)) %>%
+  mutate(q30_actividad_adecuada = recode(q30_actividad_adecuada,
+    "si"="Si","no"="No","parcialmente"="Parcialmente","prefiero_no_responder"="Prefiero no responder"
+  )) %>%
+  arrange(desc(N)) %>%
+  select(`Actividad adecuada a conocimientos` = q30_actividad_adecuada, N, `% ponderado`)
+```
+
+## 5.12 Q31 — Cobertura de necesidades basicas primer año
+
+Solo quienes trabajaron en el primer año (Q21 = "si").
+
+```{r q31}
+sub31 <- encuesta_momento2 %>% filter(q21_trabajo_primer_anio == "si", !is.na(q31_necesidades_basicas))
+sub31 %>%
+  group_by(q31_necesidades_basicas) %>%
+  summarise(N = n(), `% ponderado` = round(sum(weightvec) / sum(sub31$weightvec) * 100, 1)) %>%
+  mutate(q31_necesidades_basicas = recode(q31_necesidades_basicas,
+    "completamente"="Completamente","bastante_bien"="Bastante bien","justo"="Justo",
+    "insuficiente"="Insuficiente","muy_deficiente"="Muy deficiente"
+  )) %>%
+  arrange(desc(N)) %>%
+  select(`Cobertura necesidades basicas primer año` = q31_necesidades_basicas, N, `% ponderado`)
+```
+
+## 5.13 Q32 — Subsidios o programas sociales primer año
+
+Responde toda la muestra del Momento 2.
+
+```{r q32}
+sub32 <- encuesta_momento2 %>% filter(!is.na(q32_subsidios))
+sub32 %>%
+  group_by(q32_subsidios) %>%
+  summarise(N = n(), `% ponderado` = round(sum(weightvec) / sum(sub32$weightvec) * 100, 1)) %>%
+  mutate(q32_subsidios = recode(q32_subsidios,
+    "si"="Si","no"="No","prefiero_no_responder"="Prefiero no responder / No se"
+  )) %>%
+  arrange(desc(N)) %>%
+  select(`Recibio ayuda o programa social primer año` = q32_subsidios, N, `% ponderado`)
+```
+
+---
+
+# 6. Momento 3 — Situacion actual
+
+> Responde toda la muestra (N = `r nrow(encuesta_clean)`).
+
+## 6.1 Q33 — Situacion laboral actual
+
+```{r q33}
+sub33 <- encuesta_clean %>% filter(!is.na(q33_trabajo_actualidad))
+sub33 %>%
+  group_by(q33_trabajo_actualidad) %>%
+  summarise(N = n(), `% ponderado` = round(sum(weightvec) / sum(sub33$weightvec) * 100, 1)) %>%
+  mutate(q33_trabajo_actualidad = recode(q33_trabajo_actualidad,
+    "si"="Si, trabaja","no_jubilado"="No, jubilado/retirado",
+    "no_estudio"="No, solo estudia","no_desempleado"="No, desempleado/buscando trabajo"
+  )) %>%
+  arrange(desc(N)) %>%
+  select(`Situacion laboral actual` = q33_trabajo_actualidad, N, `% ponderado`)
+```
+
+## 6.2 Q34 — Cantidad de trabajos actuales
+
+Solo quienes trabajan actualmente (Q33 = "si"). Valores >= 5 o < 1 convertidos a NA por posible error de carga.
+
+```{r q34}
+sub34 <- encuesta_clean %>% filter(q33_trabajo_actualidad == "si", !is.na(q34_trabajos_cantidad))
+sub34 %>%
+  group_by(q34_trabajos_cantidad) %>%
+  summarise(N = n(), `% ponderado` = round(sum(weightvec) / sum(sub34$weightvec) * 100, 1)) %>%
+  arrange(q34_trabajos_cantidad) %>%
+  select(`Cantidad de trabajos` = q34_trabajos_cantidad, N, `% ponderado`)
+```
+
+## 6.3 Q35 — Principal fuente de ingresos actual
+
+Solo quienes trabajan actualmente (Q33 = "si").
+
+```{r q35}
+sub35 <- encuesta_clean %>% filter(q33_trabajo_actualidad == "si", !is.na(q35_ocupacion_actual_ingreso))
+sub35 %>%
+  group_by(q35_ocupacion_actual_ingreso) %>%
+  summarise(N = n(), `% ponderado` = round(sum(weightvec) / sum(sub35$weightvec) * 100, 1)) %>%
+  mutate(q35_ocupacion_actual_ingreso = recode(q35_ocupacion_actual_ingreso,
+    "salario_fijo"="Trabajo con salario fijo","cuenta_propia"="Trabajo por cuenta propia",
+    "changas"="Trabajos esporadicos / changas / subempleo",
+    "trabajo_sin_remuneracion"="Trabajo sin remuneracion","otro"="Otra"
+  )) %>%
+  arrange(desc(N)) %>%
+  select(`Situacion ocupacional actual` = q35_ocupacion_actual_ingreso, N, `% ponderado`)
+```
+
+> Nota: varios entrevistados en "Otra" indicaron trabajo informal, sugiriendo que no asocian "salario fijo" con empleo informal.
+
+## 6.4 Q36 — Formalidad del trabajo actual
+
+Solo quienes tienen salario fijo o cuenta propia (Q35).
+
+```{r q36}
+sub36 <- encuesta_clean %>% filter(q35_ocupacion_actual_ingreso %in% c("salario_fijo","cuenta_propia"), !is.na(q36_formalidad_trabajo))
+sub36 %>%
+  group_by(q36_formalidad_trabajo) %>%
+  summarise(N = n(), `% ponderado` = round(sum(weightvec) / sum(sub36$weightvec) * 100, 1)) %>%
+  mutate(q36_formalidad_trabajo = recode(q36_formalidad_trabajo,"formal"="Formal","informal"="Informal")) %>%
+  arrange(desc(N)) %>%
+  select(`Formalidad del trabajo actual` = q36_formalidad_trabajo, N, `% ponderado`)
+```
+
+## 6.5 Q37 — Actividad laboral actual
+
+Solo quienes trabajan por cuenta propia o changas (Q35).
+
+```{r q37}
+sub37 <- encuesta_clean %>% filter(q35_ocupacion_actual_ingreso %in% c("cuenta_propia","changas"), !is.na(q37_trabajo_actual))
+sub37 %>%
+  group_by(q37_trabajo_actual) %>%
+  summarise(N = n(), `% ponderado` = round(sum(weightvec) / sum(sub37$weightvec) * 100, 1)) %>%
+  mutate(q37_trabajo_actual = recode(q37_trabajo_actual,
+    "patron"="Patron de un negocio (empleador)","profesional"="Profesional independiente",
+    "servicio_oficio"="Trabajo de servicio u oficio","emprendimiento"="Emprendimiento",
+    "venta_ambulante"="Venta ambulante","plataforma"="Trabajo en plataformas",
+    "trabajo_temporal"="Trabajo estacional o por periodos","otro"="Otra"
+  )) %>%
+  arrange(desc(N)) %>%
+  select(`Actividad laboral actual` = q37_trabajo_actual, N, `% ponderado`)
+```
+
+> Nota: "Otra" cuenta con 38 respuestas pendientes de recodificacion con el equipo.
+
+## 6.6 Q38 — Ocupacion actual (texto libre) — Top 15 terminos
+
+```{r q38}
+encuesta_clean %>%
+  filter(!is.na(q38_ocupacion_actual)) %>%
+  select(q38_ocupacion_actual) %>%
+  unnest_tokens(word, q38_ocupacion_actual) %>%
+  filter(!word %in% stopwords_es, nchar(word) > 3) %>%
+  count(word, sort=TRUE) %>%
+  slice_max(n, n=15) %>%
+  select(Termino = word, Frecuencia = n)
+```
+
+## 6.7 Q39 — Como obtuvo el trabajo actual
+
+Solo quienes trabajan actualmente (Q33 = "si").
+
+```{r q39}
+sub39 <- encuesta_clean %>% filter(!is.na(q39_obtencion_trabajo))
+sub39 %>%
+  group_by(q39_obtencion_trabajo) %>%
+  summarise(N = n(), `% ponderado` = round(sum(weightvec) / sum(sub39$weightvec) * 100, 1)) %>%
+  mutate(q39_obtencion_trabajo = recode(q39_obtencion_trabajo,
+    "vino_con_trabajo"="Vine con trabajo desde mi pais de origen",
+    "anuncios_redes"="A traves de anuncios, plataformas y redes",
+    "dejo_cv"="Deje mi curriculum y me llamaron",
+    "recomendación_familiar"="Por recomendacion de conocido, compatriota o familiar",
+    "agencia_empleo"="A traves de una oficina o agencia de empleo","otro"="Otra"
+  )) %>%
+  arrange(desc(N)) %>%
+  select(`Como obtuvo el trabajo actual` = q39_obtencion_trabajo, N, `% ponderado`)
+```
+
+```{r q39-texto}
+encuesta_clean %>%
+  filter(q39_obtencion_trabajo == "otro", !is.na(q39_otra_obtencion_trabajo)) %>%
+  select(q39_otra_obtencion_trabajo) %>%
+  unnest_tokens(word, q39_otra_obtencion_trabajo) %>%
+  filter(!word %in% stopwords_es, nchar(word) > 3) %>%
+  count(word, sort=TRUE) %>%
+  slice_max(n, n=15) %>%
+  select(Termino = word, Frecuencia = n)
+```
+
+## 6.8 Q40 — Estudios realizados desde que llego a Argentina (seleccion multiple)
+
+Los porcentajes suman mas de 100% porque cada persona podia elegir multiples opciones.
+
+```{r q40}
+tibble(
+  Formacion = c(
+    "Estudios de nivel primario","Estudios de nivel secundario","Estudios de nivel terciario",
+    "Estudios universitarios (grado)","Estudios de posgrado",
+    "Capacitaciones laborales / cursos de idioma","No estudio desde que llego"
+  ),
+  N = c(
+    sum(encuesta_clean$`q40_estudios/si_primaria`,       na.rm=TRUE),
+    sum(encuesta_clean$`q40_estudios/si_secundaria`,     na.rm=TRUE),
+    sum(encuesta_clean$`q40_estudios/si_terciario`,      na.rm=TRUE),
+    sum(encuesta_clean$`q40_estudios/si_universidad`,    na.rm=TRUE),
+    sum(encuesta_clean$`q40_estudios/si_postgrado`,      na.rm=TRUE),
+    sum(encuesta_clean$`q40_estudios/si_capacitaciones`, na.rm=TRUE),
+    sum(encuesta_clean$`q40_estudios/no`,                na.rm=TRUE)
+  ),
+  `% ponderado` = c(
+    round(sum(encuesta_clean$`q40_estudios/si_primaria`       * encuesta_clean$weightvec, na.rm=TRUE) / total_pesos * 100, 1),
+    round(sum(encuesta_clean$`q40_estudios/si_secundaria`     * encuesta_clean$weightvec, na.rm=TRUE) / total_pesos * 100, 1),
+    round(sum(encuesta_clean$`q40_estudios/si_terciario`      * encuesta_clean$weightvec, na.rm=TRUE) / total_pesos * 100, 1),
+    round(sum(encuesta_clean$`q40_estudios/si_universidad`    * encuesta_clean$weightvec, na.rm=TRUE) / total_pesos * 100, 1),
+    round(sum(encuesta_clean$`q40_estudios/si_postgrado`      * encuesta_clean$weightvec, na.rm=TRUE) / total_pesos * 100, 1),
+    round(sum(encuesta_clean$`q40_estudios/si_capacitaciones` * encuesta_clean$weightvec, na.rm=TRUE) / total_pesos * 100, 1),
+    round(sum(encuesta_clean$`q40_estudios/no`                * encuesta_clean$weightvec, na.rm=TRUE) / total_pesos * 100, 1)
+  )
+) %>% arrange(desc(`% ponderado`))
+```
+
+## 6.9 Q41 — Envóo de remesas actualmente
+
+```{r q41}
+sub41 <- encuesta_clean %>% filter(!is.na(q41_remesas_actualidad))
+sub41 %>%
+  group_by(q41_remesas_actualidad) %>%
+  summarise(N = n(), `% ponderado` = round(sum(weightvec) / sum(sub41$weightvec) * 100, 1)) %>%
+  mutate(q41_remesas_actualidad = recode(q41_remesas_actualidad,
+    "regularmente"="Si, regularmente","a_veces"="Si, de vez en cuando",
+    "no"="No","prefiero_no_responder"="Prefiero no responder"
+  )) %>%
+  arrange(desc(N)) %>%
+  select(`Envio de remesas actual` = q41_remesas_actualidad, N, `% ponderado`)
+```
+
+## 6.10 Q42 — Medios de envío de remesas
+
+Solo quienes envian remesas actualmente (Q41 = "Sí, regularmente" o "Sí, de vez en cuando").
+
+```{r q42}
+sub42 <- encuesta_clean %>% filter(q41_remesas_actualidad %in% c("regularmente","a_veces"), !is.na(q42_envio_remesas))
+sub42 %>%
+  group_by(q42_envio_remesas) %>%
+  summarise(N = n(), `% ponderado` = round(sum(weightvec) / sum(sub42$weightvec) * 100, 1)) %>%
+  mutate(q42_envio_remesas = recode(q42_envio_remesas,
+    "transferencia_bancaria"="Transferencia bancaria",
+    "envio_empresa"="Empresas de envio de dinero (Western Union, MoneyGram, etc.)",
+    "crypto"="Criptomonedas","familiares_amigos"="A traves de familiares o amigos","otra"="Otra"
+  )) %>%
+  arrange(desc(N)) %>%
+  select(`Medio de envio de remesas` = q42_envio_remesas, N, `% ponderado`)
+```
+
+## 6.11 Q43 — Dificultades para acceder al trabajo en los ultimos dos años
+
+```{r q43}
+sub43 <- encuesta_clean %>% filter(!is.na(q43_dificultad_trabajo))
+sub43 %>%
+  group_by(q43_dificultad_trabajo) %>%
+  summarise(N = n(), `% ponderado` = round(sum(weightvec) / sum(sub43$weightvec) * 100, 1)) %>%
+  mutate(q43_dificultad_trabajo = recode(q43_dificultad_trabajo,
+    "si"="Si","no"="No","prefiero_no_responder"="Prefiero no responder"
+  )) %>%
+  arrange(desc(N)) %>%
+  select(`Dificultades para acceder al trabajo` = q43_dificultad_trabajo, N, `% ponderado`)
+```
+
+## 6.12 Q44 — Principal dificultad de acceso actual
+
+Solo quienes tuvieron dificultades (Q43 = "si").
+
+```{r q44}
+sub44 <- encuesta_clean %>% filter(q43_dificultad_trabajo == "si", !is.na(q44_tipo_dificultades_trabajo_))
+sub44 %>%
+  group_by(q44_tipo_dificultades_trabajo_) %>%
+  summarise(N = n(), `% ponderado` = round(sum(weightvec) / sum(sub44$weightvec) * 100, 1)) %>%
+  mutate(q44_tipo_dificultades_trabajo_ = recode(q44_tipo_dificultades_trabajo_,
+    "dificultades_y_demoras_con_el_reconocimi"="Homologación/reconocimiento de títulos",
+    "discriminaci_n_por_mi_condici_n_de_extra"="Discriminación por condicion de extranjero/a",
+    "falta_de_documentaci_n__dni_u_otros_docu"="Falta de documentación (DNI u otros)",
+    "dificultades_con_el_idioma"="Dificultades con el idioma",
+    "falta_de_experiencia_previa"="Falta de experiencia previa",
+    "hay_poca_oferta_de_trabajo_en_el_rubro_l"="Poca oferta en el rubro buscado",
+    "no_sab_a_d_nde_buscar_trabajo"="No sabia donde buscar trabajo",
+    "prefiero_no_responder"="Prefiero no responder","otras"="Otras"
+  )) %>%
+  arrange(desc(N)) %>%
+  select(`Principal dificultad actual` = q44_tipo_dificultades_trabajo_, N, `% ponderado`)
+```
+
+## 6.13 Q45 — Adecuacion del trabajo actual al area de conocimiento
+
+Solo quienes trabajan actualmente (Q33 = "si").
+
+```{r q45}
+sub45 <- encuesta_clean %>% filter(!is.na(q45_trabajo_experiencia))
+sub45 %>%
+  group_by(q45_trabajo_experiencia) %>%
+  summarise(N = n(), `% ponderado` = round(sum(weightvec) / sum(sub45$weightvec) * 100, 1)) %>%
+  mutate(q45_trabajo_experiencia = recode(q45_trabajo_experiencia,
+    "si"="Si","no"="No","parcialmente"="Parcialmente","prefiero_no_responder"="Prefiero no responder"
+  )) %>%
+  arrange(desc(N)) %>%
+  select(`Actividad adecuada a conocimientos` = q45_trabajo_experiencia, N, `% ponderado`)
+```
+
+## 6.14 Q46 — Programas sociales actuales
+
+```{r q46}
+sub46 <- encuesta_clean %>% filter(!is.na(q46_ayuda_estatal_inclusion))
+sub46 %>%
+  group_by(q46_ayuda_estatal_inclusion) %>%
+  summarise(N = n(), `% ponderado` = round(sum(weightvec) / sum(sub46$weightvec) * 100, 1)) %>%
+  mutate(q46_ayuda_estatal_inclusion = recode(q46_ayuda_estatal_inclusion,
+    "si"="Si","no"="No","prefiero_no_responder"="Prefiero no responder / No se"
+  )) %>%
+  arrange(desc(N)) %>%
+  select(`Recibe ayuda o programa social` = q46_ayuda_estatal_inclusion, N, `% ponderado`)
+```
+
+Programas mencionados por quienes respondieron Si — Top 15 terminos. Destacan AUH, Volver al Trabajo / Ex Potenciar Trabajo y Jubilación.
+
+```{r q46-texto}
+encuesta_clean %>%
+  filter(q46_ayuda_estatal_inclusion == "si", !is.na(q46_nombre_programa_estatal)) %>%
+  select(q46_nombre_programa_estatal) %>%
+  unnest_tokens(word, q46_nombre_programa_estatal) %>%
+  filter(!word %in% stopwords_es, nchar(word) > 2) %>%
+  count(word, sort=TRUE) %>%
+  slice_max(n, n=15) %>%
+  select(Termino = word, Frecuencia = n)
+```
+
+## 6.15 Q47 — Cobertura de necesidades básicas actual
+
+Solo quienes trabajan actualmente (Q33 = "si").
+
+```{r q47}
+sub47 <- encuesta_clean %>% filter(!is.na(q47_necesidades_basicas))
+sub47 %>%
+  group_by(q47_necesidades_basicas) %>%
+  summarise(N = n(), `% ponderado` = round(sum(weightvec) / sum(sub47$weightvec) * 100, 1)) %>%
+  mutate(q47_necesidades_basicas = recode(q47_necesidades_basicas,
+    "completamente"="Completamente","bastante_bien"="Bastante bien","justo"="Justo",
+    "insuficiente"="Insuficiente","muy_deficiente"="Muy deficiente"
+  )) %>%
+  arrange(desc(N)) %>%
+  select(`Cobertura necesidades basicas actual` = q47_necesidades_basicas, N, `% ponderado`)
+```
+
+## 6.16 Q48 — Mejora de situación laboral respecto al país de origen
+
+```{r q48}
+sub48 <- encuesta_clean %>% filter(!is.na(q48_mejora_origen))
+sub48 %>%
+  group_by(q48_mejora_origen) %>%
+  summarise(N = n(), `% ponderado` = round(sum(weightvec) / sum(sub48$weightvec) * 100, 1)) %>%
+  mutate(q48_mejora_origen = recode(q48_mejora_origen,
+    "si"="Si","no"="No","parcialmente"="Parcialmente",
+    "no_aplica"="No aplica / No se","prefiero_no_responder"="Prefiero no responder"
+  )) %>%
+  arrange(desc(N)) %>%
+  select(`Mejora respecto al pais de origen` = q48_mejora_origen, N, `% ponderado`)
+```
+
+## 6.17 Q49 — Comentarios libres — Top 15 términos
+
+```{r q49}
+encuesta_clean %>%
+  filter(!is.na(q49_comentarios)) %>%
+  select(q49_comentarios) %>%
+  unnest_tokens(word, q49_comentarios) %>%
+  filter(!word %in% stopwords_es, nchar(word) > 3) %>%
+  count(word, sort=TRUE) %>%
+  slice_max(n, n=15) %>%
+  select(Termino = word, Frecuencia = n)
+```
+
+---
+
+*Encuesta sobre trayectorias sociolaborales de personas migrantes en AMBA — Universidad de Tubingen / UNSAM*
