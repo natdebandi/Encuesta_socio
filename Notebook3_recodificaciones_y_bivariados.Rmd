@@ -1,0 +1,236 @@
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE,
+                      fig.width = 9, fig.height = 5.5)
+```
+
+```{r librerias}
+library(tidyverse)
+library(readr)
+library(paletteer)
+library(survey)      # para Chi-cuadrado de Rao-Scott
+library(openxlsx)    # para exportar tablas a Excel
+```
+
+```{r carga-y-limpieza}
+# === BLOQUE IGUAL AL NOTEBOOK 2 ===
+encuesta <- read_csv(
+  "data/Trayectorias laborales vf kobo weightvec v3.csv",
+  locale = locale(encoding = "UTF-8"),
+  show_col_types = FALSE
+)
+
+encuesta_clean <- encuesta %>%
+  select(
+    -`q40_estudios/s__estudios_de_nivel_primario`,
+    -`q40_estudios/s__estudios_de_nivel_secundario`,
+    -`q40_estudios/s__estudios_de_nivel_terciario__institut`,
+    -`q40_estudios/s__estudios_universitarios__carrera_de_g`,
+    -`q40_estudios/s__estudios_de_postgrado`,
+    -`q40_estudios/s__capacitaciones_laborales_profesionale`,
+    -`q40_estudios/no__no_estudi__desde_que_llegu__a_argent`,
+    -`...1`, -`__version__`, -`_tags`, -`_index`,
+    -start, -end
+  ) %>%
+  mutate(q12_anio_salida = case_when(
+    q12_anio_salida == 219  ~ 2019,
+    q12_anio_salida == 2995 ~ 1995,
+    q12_anio_salida == 28   ~ 2018,
+    q12_anio_salida == 210  ~ 2010,
+    q12_anio_salida == 19   ~ 2006,
+    q12_anio_salida == 20   ~ 2006,
+    q12_anio_salida == 1949 ~ 1949,
+    q12_anio_salida %in% c(1, 18, 22, 1918) ~ NA_real_,
+    TRUE ~ q12_anio_salida
+  )) %>%
+  mutate(q19_anio_arribo = case_when(
+    q19_anio_arribo == 21            ~ 2004,
+    q19_anio_arribo %in% c(18, 1918) ~ NA_real_,
+    TRUE                             ~ q19_anio_arribo
+  )) %>%
+  mutate(q34_trabajos_cantidad = case_when(
+    q34_trabajos_cantidad >= 5 | q34_trabajos_cantidad < 1 ~ NA_real_,
+    TRUE ~ q34_trabajos_cantidad
+  ))
+
+total_pesos <- sum(encuesta_clean$weightvec)
+
+encuesta_clean <- encuesta_clean %>%
+  mutate(q7_estudios = factor(q7_estudios, levels = c(
+    "sin_estudios","primario_incompleto","primario_completo",
+    "secundario_incompleto","secundario_completo",
+    "terciario_incompleto","terciario_completo",
+    "universitario_incompleto","universitario_completo",
+    "posgrado_incompleto","posgrado_completo","prefiero_no_responder"
+  ))) %>%
+  mutate(q7_estudios_grupo = case_when(
+    q7_estudios == "sin_estudios"                                      ~ "Sin estudios",
+    q7_estudios %in% c("primario_incompleto","primario_completo")      ~ "Hasta primario completo",
+    q7_estudios %in% c("secundario_incompleto","secundario_completo")  ~ "Hasta secundario completo",
+    q7_estudios %in% c("terciario_incompleto","terciario_completo")    ~ "Hasta terciario completo",
+    q7_estudios %in% c("universitario_incompleto","universitario_completo",
+                       "posgrado_incompleto","posgrado_completo")      ~ "Universitario y posgrado",
+    TRUE ~ NA_character_
+  ) %>%
+  factor(levels = c("Sin estudios","Hasta primario completo",
+                    "Hasta secundario completo","Hasta terciario completo",
+                    "Universitario y posgrado"))) %>%
+  mutate(q7_estudios_grupo2 = case_when(
+    q7_estudios %in% c("sin_estudios","primario_incompleto","primario_completo",
+                       "secundario_incompleto")          ~ "Hasta secundario incompleto",
+    q7_estudios %in% c("secundario_completo","terciario_incompleto",
+                       "universitario_incompleto")       ~ "Secundario completo",
+    q7_estudios %in% c("terciario_completo","universitario_completo",
+                       "posgrado_incompleto","posgrado_completo") ~ "Superior o universitario completo y mas",
+    q7_estudios == "prefiero_no_responder"               ~ "Prefiero no responder",
+    TRUE ~ NA_character_
+  ) %>%
+  factor(levels = c("Hasta secundario incompleto","Secundario completo",
+                    "Superior o universitario completo y mas","Prefiero no responder")))
+
+encuesta_momento2 <- encuesta_clean %>% filter(q19_anio_arribo < 2024)
+```
+
+```{r nuevas-variables-cruce}
+# === NUEVAS VARIABLES DE CRUCE — NOTEBOOK 3 ===
+
+# edad_agrupada_v1: tres grupos para comparabilidad con 2020
+encuesta_clean <- encuesta_clean %>%
+  mutate(
+    edad_agrupada_v1 = case_when(
+      edad >= 18 & edad <= 34 ~ "18-34",
+      edad >= 35 & edad <= 54 ~ "35-54",
+      edad >= 55              ~ "55 o más",
+      TRUE                    ~ NA_character_
+    ),
+    edad_agrupada_v1 = factor(edad_agrupada_v1,
+                              levels = c("18-34", "35-54", "55 o más"))
+  )
+
+# genero_agrupado: Varón / Mujer / Otro género
+encuesta_clean <- encuesta_clean %>%
+  mutate(
+    genero_agrupado = case_when(
+      sexo == "varón"  ~ "Varón",
+      sexo == "mujer"  ~ "Mujer",
+      sexo == "otro"   ~ "Otro género",
+      TRUE             ~ NA_character_
+    ),
+    genero_agrupado = factor(genero_agrupado,
+                             levels = c("Varón", "Mujer", "Otro género"))
+  )
+
+# Subconjunto para cruces con género (excluye "Otro género") 
+encuesta_genero <- encuesta_clean %>% 
+  filter(genero_agrupado %in% c("Varón", "Mujer"))
+
+# Recategorización nacionalidad
+encuesta_clean <- encuesta_clean %>%
+  mutate(
+    origen_region = case_when(
+      # Primero: clasificar por nacionalidad de la selección única de la encuesta.
+      nacionalidad %in% c("bolivia", "paraguay", "venezuela", "per",
+                          "uruguay", "chile", "brasil", "ecuador",
+                          "colombia")                          ~ "MERCOSUR",
+      nacionalidad %in% c("italia", "espania")                ~ "Extra MERCOSUR europeos",
+      # Para "otro": mirar otro_pais
+      nacionalidad == "otro" & otro_pais %in% c(
+        "Argentina", "Venezuela"
+      )                                                        ~ "MERCOSUR",
+      nacionalidad == "otro" & otro_pais %in% c(
+        "Ucrania", "Irlanda", "Reino Unido", "Alemania",
+        "Suiza", "Hungría", "Francia", "Belgica", "Rusia", "Rumania"
+      )                                                        ~ "Extra MERCOSUR europeos",
+      nacionalidad == "otro" & otro_pais %in% c(
+        "Estados Unidos", "USA", "Cuba", "México", "Mexico",
+        "Australia", "Puerto Rico", "Corea", "Corea del sur",
+        "Corea del Sur", "Guatemala", "Costa Rica", "Haiti",
+        "Trinidad y Tobago", "Senegal", "TR", "Guinea Bissau"
+      )                                                        ~ "Extra MERCOSUR no europeos",
+      nacionalidad == "otro" & is.na(otro_pais)               ~ NA_character_,
+      # Resto de nacionalidades conocidas no MERCOSUR no europeas
+      nacionalidad %in% c("haiti", "rep_blica_dominicana",
+                          "china", "senegal")                 ~ "Extra MERCOSUR no europeos",
+      TRUE                                                     ~ NA_character_
+    ),
+    origen_region = factor(origen_region,
+                           levels = c("MERCOSUR",
+                                      "Extra MERCOSUR europeos",
+                                      "Extra MERCOSUR no europeos"))
+  )
+
+# tiempo_residencia: hasta 5 / 5-9 / 10 o más años
+encuesta_clean <- encuesta_clean %>%
+  mutate(
+    tiempo_residencia = case_when(
+      q19_anio_arribo >= 2021 ~ "Hasta 5 años",
+      q19_anio_arribo >= 2016 ~ "5 a 9 años",
+      q19_anio_arribo <= 2015 ~ "10 años o más",
+      TRUE                    ~ NA_character_
+    ),
+    tiempo_residencia = factor(tiempo_residencia,
+                               levels = c("Hasta 5 años",
+                                          "5 a 9 años",
+                                          "10 años o más"))
+  )
+
+# anio_arribo_periodo y anio_arribo_decada
+encuesta_clean <- encuesta_clean %>%
+  mutate(
+    # Períodos
+    anio_arribo_periodo = case_when(
+      q19_anio_arribo <= 1988                            ~ "Antes de 1989",
+      q19_anio_arribo >= 1989 & q19_anio_arribo <= 2002  ~ "1989-2002",
+      q19_anio_arribo >= 2003 & q19_anio_arribo <= 2015  ~ "2003-2015",
+      q19_anio_arribo >= 2016                            ~ "2016-2025",
+      TRUE                                               ~ NA_character_
+    ),
+    anio_arribo_periodo = factor(anio_arribo_periodo,
+                                 levels = c("Antes de 1989", "1989-2002",
+                                            "2003-2015", "2016-2025")),
+    # Décadas
+    anio_arribo_decada = case_when(
+      q19_anio_arribo <= 1989                            ~ "Antes de 1990",
+      q19_anio_arribo >= 1990 & q19_anio_arribo <= 1999  ~ "1990-1999",
+      q19_anio_arribo >= 2000 & q19_anio_arribo <= 2009  ~ "2000-2009",
+      q19_anio_arribo >= 2010 & q19_anio_arribo <= 2019  ~ "2010-2019",
+      q19_anio_arribo >= 2020                            ~ "2020-2025",
+      TRUE                                               ~ NA_character_
+    ),
+    anio_arribo_decada = factor(anio_arribo_decada,
+                                levels = c("Antes de 1990", "1990-1999",
+                                           "2000-2009", "2010-2019",
+                                           "2020-2025"))
+  )
+
+# migracion_reciente: llegaron en 2023 o después (menos de 3 años al momento de la encuesta)
+encuesta_clean <- encuesta_clean %>%
+  mutate(
+    migracion_reciente = case_when(
+      q19_anio_arribo >= 2023 ~ "Migración reciente",
+      q19_anio_arribo <  2023 ~ "Migración no reciente",
+      TRUE                    ~ NA_character_
+    ),
+    migracion_reciente = factor(migracion_reciente,
+                                levels = c("Migración reciente",
+                                           "Migración no reciente"))
+  )
+
+# sit_doc_agrupado: Con DNI / Sin DNI
+encuesta_clean <- encuesta_clean %>%
+  mutate(
+    sit_doc_agrupado = case_when(
+      q6_situacion_documentaria %in% c("rsidencia_permanente",
+                                       "naturalizado")            ~ "Con DNI",
+      q6_situacion_documentaria %in% c("precaria_vigente",
+                                       "residencia_temporaria",
+                                       "otra",
+                                       "precaria_vencida",
+                                       "sin_dni")                 ~ "Sin DNI",
+      TRUE                                                         ~ NA_character_
+    ),
+    sit_doc_agrupado = factor(sit_doc_agrupado,
+                              levels = c("Con DNI", "Sin DNI"))
+  )
+
+```
+```
