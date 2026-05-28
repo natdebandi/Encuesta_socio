@@ -7,12 +7,11 @@ knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE,
 library(tidyverse)
 library(readr)
 library(paletteer)
-library(survey)      # para Chi-cuadrado de Rao-Scott
-library(openxlsx)    # para exportar tablas a Excel
+library(survey)
+library(openxlsx)
 ```
 
 ```{r carga-y-limpieza}
-# === BLOQUE IGUAL AL NOTEBOOK 2 ===
 encuesta <- read_csv(
   "data/Trayectorias laborales vf kobo weightvec v3.csv",
   locale = locale(encoding = "UTF-8"),
@@ -49,8 +48,7 @@ encuesta_clean <- encuesta %>%
   )) %>%
   mutate(q34_trabajos_cantidad = case_when(
     q34_trabajos_cantidad >= 5 | q34_trabajos_cantidad < 1 ~ NA_real_,
-    TRUE ~ q34_trabajos_cantidad
-  ))
+    TRUE ~ q34_trabajos_cantidad))
 
 total_pesos <- sum(encuesta_clean$weightvec)
 
@@ -233,4 +231,1494 @@ encuesta_clean <- encuesta_clean %>%
   )
 
 ```
+
+
+```{r}
+#FUNCIONES USADAS PARA ARMAR BIVARIADOS
+tabla_bivariada <- function(data, var_fila, var_col,
+                            etiq_fila  = NULL, etiq_col  = NULL,
+                            orden_fila = NULL, orden_col = NULL,
+                            excluir_fila = NULL, excluir_col = NULL) {
+  
+  # Filtro base
+  df <- data %>%
+    filter(
+      !is.na(.data[[var_fila]]),
+      !is.na(.data[[var_col]]),
+      !is.na(weightvec),
+      !.data[[var_fila]] %in% c("prefiero_no_responder", excluir_fila),
+      !.data[[var_col]]  %in% c("prefiero_no_responder", excluir_col)
+    ) %>% droplevels()
+  
+  # Etiquetas
+  if (!is.null(etiq_fila)) {
+    df <- df %>% mutate(!!var_fila := recode(.data[[var_fila]], !!!etiq_fila))
+  }
+  if (!is.null(etiq_col)) {
+    df <- df %>% mutate(!!var_col := recode(.data[[var_col]], !!!etiq_col))
+  }
+  
+  # Orden: si se provee, convertir a factor con niveles explícitos
+  # Si no se provee, usar orden alfabético como antes
+  if (!is.null(orden_fila)) {
+    df <- df %>% mutate(!!var_fila := factor(.data[[var_fila]], levels = orden_fila))
+  }
+  if (!is.null(orden_col)) {
+    df <- df %>% mutate(!!var_col := factor(.data[[var_col]], levels = orden_col))
+  }
+  
+  # N sin ponderar por celda
+  n_abs <- df %>%
+    group_by(.data[[var_fila]], .data[[var_col]]) %>%
+    summarise(n = n(), .groups = "drop")
+  
+  # Total ponderado por columna
+  total_col_w <- df %>%
+    group_by(.data[[var_col]]) %>%
+    summarise(total_col = sum(weightvec), .groups = "drop")
+  
+  # Porcentajes ponderados por columna
+  pct <- df %>%
+    group_by(.data[[var_fila]], .data[[var_col]]) %>%
+    summarise(suma_w = sum(weightvec), .groups = "drop") %>%
+    left_join(total_col_w, by = var_col) %>%
+    mutate(pct_pond = suma_w / total_col * 100)
+  
+  # Columna Total (distribución ponderada de filas)
+  total_general_w <- sum(df$weightvec)
+  total_fila_w <- df %>%
+    group_by(.data[[var_fila]]) %>%
+    summarise(suma_w = sum(weightvec), .groups = "drop") %>%
+    mutate(pct_total = suma_w / total_general_w * 100) %>%
+    rename(Categoria = all_of(var_fila))
+  
+  # N absoluto por columna
+  n_col <- df %>%
+    group_by(.data[[var_col]]) %>%
+    summarise(n_col = n(), .groups = "drop")
+  
+  # Tabla wide de porcentajes
+  tabla_pct <- pct %>%
+    select(all_of(var_fila), all_of(var_col), pct_pond) %>%
+    pivot_wider(names_from  = all_of(var_col),
+                values_from = pct_pond,
+                values_fill = 0) %>%
+    rename(Categoria = all_of(var_fila)) %>%
+    left_join(total_fila_w %>% select(Categoria, pct_total), by = "Categoria") %>%
+    rename(Total = pct_total)
+  
+  # Respetar orden de filas si se especificó
+  if (!is.null(orden_fila)) {
+    tabla_pct <- tabla_pct %>%
+      mutate(Categoria = factor(Categoria, levels = orden_fila)) %>%
+      arrange(Categoria) %>%
+      mutate(Categoria = as.character(Categoria))
+  }
+  
+  # Respetar orden de columnas si se especificó
+  if (!is.null(orden_col)) {
+    cols_ordenadas <- intersect(orden_col, names(tabla_pct))
+    tabla_pct <- tabla_pct %>%
+      select(Categoria, all_of(cols_ordenadas), Total)
+  }
+  
+  # Tabla wide de n absolutos
+  tabla_n <- n_abs %>%
+    pivot_wider(names_from  = all_of(var_col),
+                values_from = n,
+                values_fill = 0) %>%
+    rename(Categoria = all_of(var_fila))
+  
+  # Respetar orden de filas en tabla_n
+  if (!is.null(orden_fila)) {
+    tabla_n <- tabla_n %>%
+      mutate(Categoria = factor(Categoria, levels = orden_fila)) %>%
+      arrange(Categoria) %>%
+      mutate(Categoria = as.character(Categoria))
+  }
+  
+  # Respetar orden de columnas en tabla_n
+  if (!is.null(orden_col)) {
+    cols_ordenadas_n <- intersect(orden_col, names(tabla_n))
+    tabla_n <- tabla_n %>% select(Categoria, all_of(cols_ordenadas_n))
+  }
+  
+  # Fila de N total por columna
+  n_totales <- n_col %>%
+    pivot_wider(names_from = all_of(var_col), values_from = n_col) %>%
+    mutate(Categoria = "N total")
+  tabla_n <- bind_rows(tabla_n, n_totales)
+  
+  # Marcar celdas con n < 30
+  cols_cruce <- setdiff(names(tabla_pct), c("Categoria", "Total"))
+  
+  tabla_pct_display <- tabla_pct
+  for (col in cols_cruce) {
+    n_vals <- tabla_n[[col]][seq_len(nrow(tabla_pct))]
+    tabla_pct_display[[col]] <- ifelse(
+      !is.na(n_vals) & n_vals < 30,
+      paste0(round(tabla_pct[[col]], 1), "*"),
+      as.character(round(tabla_pct[[col]], 1))
+    )
+  }
+  tabla_pct_display$Total <- as.character(round(tabla_pct$Total, 1))
+  
+  # Fila Total = 100%
+  fila_100 <- c(
+    list(Categoria = "Total"),
+    setNames(as.list(rep("100", length(cols_cruce))), cols_cruce),
+    list(Total = "100")
+  ) %>% as_tibble()
+  
+  tabla_pct_display <- bind_rows(tabla_pct_display, fila_100)
+  
+  # --- Rao-Scott ---
+  cols_ok  <- n_col %>% filter(n_col >= 30) %>% pull(all_of(var_col))
+  filas_ok <- n_abs %>%
+    group_by(.data[[var_fila]]) %>%
+    summarise(n_total = sum(n), .groups = "drop") %>%
+    filter(n_total >= 30) %>%
+    pull(all_of(var_fila))
+  
+  df_rs <- df %>%
+    filter(.data[[var_col]] %in% cols_ok,
+           .data[[var_fila]] %in% filas_ok) %>%
+    droplevels()   # elimina niveles de factor vacíos antes del test
+  
+  rs_nota   <- ""
+  rs_obj    <- NULL
+  pie_tabla <- ""
+  
+  # Categorias excluidas por n < 30 en columnas
+  todas_cols    <- as.character(unique(df[[var_col]]))
+  excluidas_col <- setdiff(todas_cols, cols_ok)
+  if (length(excluidas_col) > 0) {
+    rs_nota <- paste0(
+      "\nNota test: Categorias de columna excluidas del chi-cuadrado por n < 30: ",
+      paste(excluidas_col, collapse = ", "), "."
+    )
+  }
+  
+  # Categorias excluidas por n < 30 en filas
+  todas_filas   <- as.character(unique(df[[var_fila]]))
+  excluidas_fil <- setdiff(todas_filas, filas_ok)
+  if (length(excluidas_fil) > 0) {
+    rs_nota <- paste0(rs_nota,
+      "\nNota test: Categorias de fila excluidas del chi-cuadrado por n < 30: ",
+      paste(excluidas_fil, collapse = ", "), "."
+    )
+  }
+
+  tryCatch({
+    niveles_col_rs  <- length(unique(as.character(df_rs[[var_col]])))
+    niveles_fila_rs <- length(unique(as.character(df_rs[[var_fila]])))
+    
+    if (niveles_col_rs < 2 || niveles_fila_rs < 2) {
+      pie_tabla <- paste0(
+        "Test de Rao-Scott no disponible: tras excluir Categorias con n < 30 ",
+        "no quedan suficientes niveles para calcular el estadístico.",
+        "\nDatos ponderados. N = ", nrow(df), rs_nota
+      )
+    } else {
+      disenio     <- svydesign(ids = ~1, weights = ~weightvec, data = df_rs)
+      formula_chi <- as.formula(paste("~", var_fila, "+", var_col))
+      rs_obj      <- suppressWarnings(
+        svychisq(formula_chi, design = disenio, statistic = "Chisq")
+      )
+      pie_tabla <- paste0(
+        "Chi-cuadrado de Rao-Scott = ", round(rs_obj$statistic, 3),
+        ", gl = ", round(rs_obj$parameter, 0),
+        ", p = ", ifelse(rs_obj$p.value < 0.0001, "< 0,0001", round(rs_obj$p.value, 4)),
+        ". Datos ponderados. N = ", nrow(df),
+        rs_nota,
+        if (rs_obj$p.value >= 0.05) "\nNota: No se encontró asociación estadísticamente significativa. Las diferencias deben interpretarse con cautela." else ""
+      )
+    }
+  }, error = function(e) {
+    pie_tabla <<- paste0("Test de Rao-Scott no disponible: ", e$message,
+                         "\nDatos ponderados. N = ", nrow(df), rs_nota)
+  })
+  
+  list(
+    tabla_pct         = tabla_pct_display,
+    tabla_pct_numeric = tabla_pct,
+    tabla_n           = tabla_n,
+    pie               = pie_tabla,
+    rs                = rs_obj,
+    n                 = nrow(df)
+  )
+}
+#===============================================================
+# FUNCION PARA EXPORTAR A EXCEL
+# Crear carpeta si no existe
+dir.create("Archivos_excel", showWarnings = FALSE)
+
+exportar_hoja <- function(wb, nombre_hoja, resultado) {
+  addWorksheet(wb, nombre_hoja)
+  
+  # Título tabla de porcentajes
+  writeData(wb, nombre_hoja, "Tabla de porcentajes ponderados (%)", startRow = 1)
+  writeData(wb, nombre_hoja, resultado$tabla_pct, startRow = 2)
+  
+  fila_pie_pct <- nrow(resultado$tabla_pct) + 4
+  writeData(wb, nombre_hoja, resultado$pie, startRow = fila_pie_pct)
+  
+  # Título tabla de n absolutos
+  fila_n <- fila_pie_pct + 3
+  writeData(wb, nombre_hoja, "Tabla de frecuencias absolutas (n sin ponderar)", startRow = fila_n)
+  writeData(wb, nombre_hoja, resultado$tabla_n, startRow = fila_n + 1)
+}
+
+```
+
+# 1. Distribuciones de Variables sociodemograficas
+## 1.a Edad (agrupada 1)
+```{r edad-agrupada v1}
+encuesta_clean %>%
+  filter(!is.na(edad_agrupada_v1)) %>%
+  group_by(edad_agrupada_v1) %>%
+  summarise(N = n(), `% ponderado` = round(sum(weightvec) / sum(encuesta_clean$weightvec[!is.na(encuesta_clean$edad_agrupada_v1)]) * 100, 1))%>% select(`Grupo etario` = edad_agrupada_v1, N, `% ponderado`)
+```
+
+## 1.b Edad (agrupada 2)
+
+```{r edad-agrupada v2}
+encuesta_clean %>%
+  filter(!is.na(edad_agrupada)) %>%
+  group_by(edad_agrupada) %>%
+  summarise(N = n(), `% ponderado` = round(sum(weightvec) / sum(encuesta_clean$weightvec[!is.na(encuesta_clean$edad_agrupada)]) * 100, 1)) %>%
+  select(`Grupo etario` = edad_agrupada, N, `% ponderado`)
+```
+
+## 1.c Nacionalidad (variable nac agrupada)
+
+```{r nac-univariado}
+encuesta_clean %>%
+  filter(!is.na(nac)) %>%
+  group_by(nac) %>%
+  summarise(N = n(), `% ponderado` = round(sum(weightvec) / sum(encuesta_clean$weightvec[!is.na(encuesta_clean$nac)]) * 100, 1)) %>%
+  arrange(desc(N)) %>%
+  select(Nacionalidad = nac, N, `% ponderado`)
+```
+
+## 1.d Nacionalidad - Variable nacionalidad sin agrupar (16 categorías)
+
+```{r nacionalidad-univariado}
+encuesta_clean %>%
+  filter(!is.na(nacionalidad)) %>%
+  group_by(nacionalidad) %>%
+  summarise(N = n(), `% ponderado` = round(sum(weightvec) / sum(encuesta_clean$weightvec[!is.na(encuesta_clean$nacionalidad)]) * 100, 1)) %>% mutate(nacionalidad = recode(nacionalidad,
+    "venezuela"  = "Venezuela",
+    "paraguay"          =  "Paraguay",
+    "bolivia"  = "Bolivia",
+    "per"          =  "Perú",
+    "colombia"          =  "Colombia",
+    "chile"          =  "Chile",
+    "uruguay"          =  "Uruguay",
+    "brasil"          =  "Brasil",
+    "ecuador"          =  "Ecuador",
+    "otro"          =  "Otro",
+    "italia"          =  "Italia",
+    "senegal"          =  "Senegal",
+    "haiti"          =  "Haití",
+    "rep_blica_dominicana"          =  "República Dominicana",
+    "china"          =  "China",
+    "espania"          =  "España",
+    
+  )) %>% 
+  arrange(desc(N)) %>%
+  select(Nacionalidad = nacionalidad, N, `% ponderado`)
+```
+## 1.f Nacionalidad - Variable agrupada región MERCOSUR
+
+Nota: el N en esta categorización es de 1103 (una fila menos que en las demás de nacionalidad). 
+Se debe a que una persona seleccionó "Otro" y no completó su nacionalidad. La región no es imputable. Se excluye el NA de las tablas.
+```{r nacionalidad-region-univariado}
+encuesta_clean %>%
+  filter(!is.na(origen_region)) %>%
+  group_by(origen_region) %>%
+  summarise(N = n(), `% ponderado` = round(sum(weightvec) / sum(encuesta_clean$weightvec[!is.na(encuesta_clean$origen_region)]) * 100, 1)) %>%
+  arrange(desc(N)) %>%
+  select(Región_Origen = origen_region, N, `% ponderado`)
+```
+
+
+## 1.g Género distribución
+
+```{r q3-genero-univariado}
+encuesta_clean %>%
+  filter(!is.na(sexo)) %>%
+  group_by(sexo) %>%
+  summarise(N = n(), `% ponderado` = round(sum(weightvec) / sum(encuesta_clean$weightvec[!is.na(encuesta_clean$sexo)]) * 100, 1)) %>%
+  mutate(sexo = recode(sexo,
+    "mujer"  = "Mujer",
+    "varón"          =  "Varón",
+    "otro"  = "Otro género",
+  )) %>% 
+  arrange(desc(N)) %>%
+  select(Sexo = sexo, N, `% ponderado`)
+```
+
+## 1.h Provincia de residencia
+En la ponderación se excluyeron algunos casos pertenecientes a otras provincias.
+
+```{r q4-provincias-univariado}
+encuesta_clean %>%
+  filter(!is.na(provincia)) %>%
+  group_by(provincia) %>%
+  summarise(N = n(), `% ponderado` = round(sum(weightvec) / sum(encuesta_clean$weightvec[!is.na(encuesta_clean$provincia)]) * 100, 1)) %>% mutate(provincia = recode(provincia,
+    "caba"  = "Ciudad Autónoma de Buenos Aires",
+    "pba"          =  "Provincia de Buenos Aires"
+  ))  %>% select(Provincia = provincia, N, `% ponderado`)
+```
+
+## 1.i Zona de residencia
+
+```{r zona-univariado}
+encuesta_clean %>%
+  filter(!is.na(zona)) %>%
+  group_by(zona) %>%
+  summarise(N = n(), `% ponderado` = round(sum(weightvec) / sum(encuesta_clean$weightvec[!is.na(encuesta_clean$zona)]) * 100, 1)) %>%arrange(desc(N)) %>%
+  mutate(zona = recode(zona,
+    "zona_caba"  = "CABA",
+    "zona_sur"          =  "Zona Sur",
+    "zona_norte"          =  "Zona Norte",
+    "zona_oeste"          =  "Zona Oeste"
+  )) %>% 
+  select(Zona = zona, N, `% ponderado`)
+```
+
+## 1.j Situación documentaria sin agrupar
+
+```{r q6-sit-documentaria-univariado}
+encuesta_clean %>%
+  filter(!is.na(q6_situacion_documentaria)) %>%
+  group_by(q6_situacion_documentaria) %>%
+  summarise(N = n(), `% ponderado` = round(sum(weightvec) / sum(encuesta_clean$weightvec[!is.na(encuesta_clean$q6_situacion_documentaria)]) * 100, 1)) %>%
+  mutate(q6_situacion_documentaria = recode(q6_situacion_documentaria,
+    "rsidencia_permanente"  = "Residencia permanente",
+    "naturalizado"          = "Naturalizado/a",
+    "residencia_temporaria" = "Residencia temporaria",
+    "precaria_vigente"      = "Precaria vigente",
+    "precaria_vencida"      = "Precaria vencida",
+    "sin_dni"               = "Sin DNI",
+    "otra"                  = "Otra"
+  )) %>%
+  arrange(desc(N)) %>%
+  select(`Situacion documentaria` = q6_situacion_documentaria, N, `% ponderado`)
+```
+
+## 1.k Nivel educativo sin agrupar
+
+```{r q7-nivel-educativo-sin-agrupar}
+encuesta_clean %>%
+  filter(!is.na(q7_estudios)) %>%
+  group_by(q7_estudios) %>%
+  summarise(N = n(), `% ponderado` = round(sum(weightvec) / sum(encuesta_clean$weightvec[!is.na(encuesta_clean$q7_estudios)]) * 100, 1)) %>%
+  mutate(q7_estudios = recode(q7_estudios,
+    "sin_estudios"="Sin estudios","primario_incompleto"="Primario incompleto",
+    "primario_completo"="Primario completo","secundario_incompleto"="Secundario incompleto",
+    "secundario_completo"="Secundario completo","terciario_incompleto"="Terciario incompleto",
+    "terciario_completo"="Terciario completo","universitario_incompleto"="Universitario incompleto",
+    "universitario_completo"="Universitario completo","posgrado_incompleto"="Posgrado incompleto",
+    "posgrado_completo"="Posgrado completo","prefiero_no_responder"="Prefiero no responder"
+  )) %>%
+  arrange(q7_estudios
+          ) %>%
+  select(`Nivel educativo` = q7_estudios, N, `% ponderado`)
+```
+
+## 1.l Nivel educativo agrupado
+Se utiliza la agrupación de la ENMA 2023.
+```{r q7-nivel-edu-agrupado}
+encuesta_clean %>%
+  filter(!is.na(q7_estudios_grupo2)) %>%
+  group_by(q7_estudios_grupo2) %>%
+  summarise(N = n(), `% ponderado` = round(sum(weightvec) / sum(encuesta_clean$weightvec[!is.na(encuesta_clean$q7_estudios_grupo2)]) * 100, 1)) %>%
+  arrange(q7_estudios_grupo2) %>%
+  select(`Nivel educativo` = q7_estudios_grupo2, N, `% ponderado`)
+```
+
+
+
+# Sección 2: Cruces Bivariados
+
+Algunos comentarios:
+-  Varias tablas se rompen en el formado pdf por su extensión; se recomienda ver los bivariados en el archivo .xslx correspondientes. Ahí también se incluye el N de casos de cada celda. 
+
+- Columnas = nacionalidad (variable independiente): nacionalidad (16 categorías), nac (7 categorías) y origen_region (3 categorías)
+
+- Filas    = variable dependiente (edad)
+- % ponderados, suman 100 % por columna
+- Celdas con n sin ponderar < 30 marcadas con *
+- Al pie de cada cuadro se encuentra el Chi-cuadrado de Rao-Scott
+
+```{r etiquetas}
+# ------------------------------------------------------------------
+# Etiquetas y órdenes reutilizados en toda la sección
+
+etiquetas_nac <- c(
+  "bolivia"   = "Bolivia",
+  "colombia"  = "Colombia",
+  "paraguay"  = "Paraguay",
+  "perú"      = "Perú",
+  "uruguay"   = "Uruguay",
+  "venezuela" = "Venezuela",
+  "otros"     = "Otros"
+)
+
+etiquetas_nac16 <- c(
+  "bolivia"              = "Bolivia",
+  "brasil"               = "Brasil",
+  "chile"                = "Chile",
+  "china"                = "China",
+  "colombia"             = "Colombia",
+  "ecuador"              = "Ecuador",
+  "espania"              = "España",
+  "haiti"                = "Haití",
+  "italia"               = "Italia",
+  "paraguay"             = "Paraguay",
+  "per"                  = "Perú",
+  "rep_blica_dominicana" = "Rep. Dominicana",
+  "senegal"              = "Senegal",
+  "uruguay"              = "Uruguay",
+  "venezuela"            = "Venezuela",
+  "otro"                 = "Otro"
+)
+
+etiquetas_region <- c(
+  "MERCOSUR"   = "MERCOSUR",
+  "Extra MERCOSUR no europeos" = "Extra MERCOSUR no europeos",
+  "Extra MERCOSUR europeos" = "Extra MERCOSUR europeos"
+)
+
+
+etiquetas_zona <- c(
+  "zona_caba"  = "CABA",
+  "zona_norte" = "Zona Norte",
+  "zona_oeste" = "Zona Oeste",
+  "zona_sur"   = "Zona Sur"
+)
+
+etiquetas_educ3 <- c(
+  "Hasta secundario incompleto"             = "Hasta secundario incompleto",
+  "Secundario completo"                     = "Secundario completo",
+  "Superior o universitario completo y mas" = "Superior o universitario completo y más",
+  "Prefiero no responder"                   = "Prefiero no responder"
+)
+
+etiquetas_educ12 <- c(
+  "sin_estudios"             = "Sin estudios",
+  "primario_incompleto"      = "Primario incompleto",
+  "primario_completo"        = "Primario completo",
+  "secundario_incompleto"    = "Secundario incompleto",
+  "secundario_completo"      = "Secundario completo",
+  "terciario_incompleto"     = "Terciario incompleto",
+  "terciario_completo"       = "Terciario completo",
+  "universitario_incompleto" = "Universitario incompleto",
+  "universitario_completo"   = "Universitario completo",
+  "posgrado_incompleto"      = "Posgrado incompleto",
+  "posgrado_completo"        = "Posgrado completo",
+  "prefiero_no_responder"    = "Prefiero no responder"
+)
+
+orden_nac7   <- c("Bolivia", "Colombia", "Paraguay", "Perú",
+                  "Uruguay", "Venezuela", "Otros")
+orden_region <- c("MERCOSUR", "Extra MERCOSUR europeos",
+                  "Extra MERCOSUR no europeos")
+orden_zona   <- c("CABA", "Zona Norte", "Zona Oeste", "Zona Sur")
+orden_genero <- c("Varón", "Mujer")
+orden_educ3  <- c("Hasta secundario incompleto",
+                  "Secundario completo",
+                  "Superior o universitario completo y más")
+orden_educ12 <- c("Sin estudios",
+                  "Primario incompleto", "Primario completo",
+                  "Secundario incompleto", "Secundario completo",
+                  "Terciario incompleto", "Terciario completo",
+                  "Universitario incompleto", "Universitario completo",
+                  "Posgrado incompleto", "Posgrado completo")
+
+orden_educ5= c("Sin estudios",
+               "Hasta primario completo",
+               "Hasta secundario completo",
+               "Hasta terciario completo",
+               "Universitario y posgrado")
+# "Prefiero no responder" se excluye con la función en todos los cruces
+```
+
+## 2.a Nacionalidad por Edad
+Se tomaron dos tipos de agrupación para nacionalidad y dos tipos de agrupación para Edad.
+```{r nacionalidad-edad}
+# ============================================================
+# TABLA A: edad_agrupadaV2 × nac (7 categorías)
+# ============================================================
+# Primero está la edad agrupada V2 y luego la V1.
+
+resultado_A <- tabla_bivariada(
+  data      = encuesta_clean,
+  var_fila  = "edad_agrupada",
+  var_col   = "nac",
+  etiq_col  = etiquetas_nac,
+  orden_col = c("Bolivia", "Colombia", "Paraguay", "Perú", "Uruguay", "Venezuela", "Otros")
+)
+
+cat("\n=== Edad Agrupada 2 × Nacionalidad (7 categorías) ===\n")
+print(resultado_A$tabla_pct)
+cat("\n", resultado_A$pie, "\n")
+
+# ============================================================
+# TABLA B: edad_agrupadaV2 × nacionalidad (16 categorías)
+# ============================================================
+# #resultado_B <- tabla_bivariada(
+#   data      = encuesta_clean,
+#   var_fila  = "edad_agrupada",
+#   var_col   = "nacionalidad",
+#   etiq_col  = etiquetas_nac16,
+#   orden_col = c("Bolivia", "Brasil", "Chile", "China", "Colombia","Ecuador","España", "Haití", "Italia", "Paraguay","Perú","Rep. Dominicana","Senegal","Uruguay","Venezuela","Otro"))
+# 
+# cat("\n=== Edad Agrupada 2 × Nacionalidad (16 categorías) ===\n")
+# print(resultado_B$tabla_pct)
+# cat("\n", resultado_B$pie, "\n")
+
+
+# ============================================================
+# TABLA C: edad_agrupadaV2 × Migracion_region (3 categorías)
+# ============================================================
+resultado_C <- tabla_bivariada(
+  data      = encuesta_clean,
+  var_fila  = "edad_agrupada",
+  var_col   = "origen_region",
+  etiq_col  = etiquetas_region,
+  orden_col = c("MERCOSUR", "Extra MERCOSUR europeos", "Extra MERCOSUR no europeos")
+)
+
+cat("\n=== Edad Agrupada 2 × Region (3 categorías) ===\n")
+print(resultado_C$tabla_pct)
+cat("\n", resultado_C$pie, "\n")
+
+# ============================================================
+# TABLA D: edad_agrupada 1 × nac (agrupada, 7 categorías)
+# ============================================================
+resultado_D <- tabla_bivariada(
+  data      = encuesta_clean,
+  var_fila  = "edad_agrupada_v1",
+  var_col   = "nac",
+  etiq_col  = etiquetas_nac,
+  orden_col = c("Bolivia", "Colombia", "Paraguay", "Perú", "Uruguay", "Venezuela", "Otros")
+)
+
+cat("\n=== Edad Agrupada 1 × Nacionalidad (7 categorías) ===\n")
+print(resultado_D$tabla_pct)
+cat("\n", resultado_D$pie, "\n")
+# 
+# # ============================================================
+# # TABLA E: edad_agrupada_ 1 × nacionalidad (16 categorías)
+# # ============================================================
+# resultado_E <- tabla_bivariada(
+#   data      = encuesta_clean,
+#   var_fila  = "edad_agrupada_v1",
+#   var_col   = "nacionalidad",
+#   etiq_col  = etiquetas_nac16,
+#   orden_col = c("Bolivia", "Brasil", "Chile", "China", "Colombia","Ecuador","España", "Haití", "Italia", "Paraguay","Perú","Rep. Dominicana","Senegal","Uruguay","Venezuela","Otro"))
+# 
+# cat("\n=== Edad Agrupada 1 × Nacionalidad (16 categorías) ===\n")
+# print(resultado_E$tabla_pct)
+# cat("\n", resultado_E$pie, "\n")
+
+
+# ============================================================
+# TABLA F: edad_agrupada V1 × Migracion_region (3 categorías)
+# ============================================================
+resultado_F <- tabla_bivariada(
+  data      = encuesta_clean,
+  var_fila  = "edad_agrupada_v1",
+  var_col   = "origen_region",
+  etiq_col  = etiquetas_region,
+  orden_col = c("MERCOSUR", "Extra MERCOSUR europeos", "Extra MERCOSUR no europeos")
+)
+
+cat("\n=== Edad Agrupada 1 × Region (3 categorías) ===\n")
+print(resultado_F$tabla_pct)
+cat("\n", resultado_F$pie, "\n")
+```
+
+```{r nacionalidad-edad-exportar}
+tabla_bivariada_nac_edad <- createWorkbook()
+exportar_hoja(tabla_bivariada_nac_edad, "Edad Agrupada 1 x Nac 7 cat",  resultado_D)
+#exportar_hoja(tabla_bivariada_nac_edad, "Edad Agrupada 1 x Nac 16 cat", resultado_E)
+exportar_hoja(tabla_bivariada_nac_edad, "Edad Agrupada 1 x Region 3 cat", resultado_F)
+exportar_hoja(tabla_bivariada_nac_edad, "Edad Agrupada 2 x Nac 7 cat",  resultado_A)
+#exportar_hoja(tabla_bivariada_nac_edad, "Edad Agrupada 2 x Nac 16 cat", resultado_B)
+exportar_hoja(tabla_bivariada_nac_edad, "Edad Agrupada 2 x Region 3 cat", resultado_C)
+
+
+saveWorkbook(tabla_bivariada_nac_edad, "Archivos_excel/01_edad_x_nacionalidad.xlsx", overwrite = TRUE)
+#cat("\nExcel exportado: Archivos_excel/01_edad_x_nacionalidad.xlsx\n")
+
+
+
+```
+
+## 2.b  Nacionalidad por zona geográfica de residencia
+Nota de lectura:
+Columnas = nacionalidad
+Filas    = variable dependiente zona
+% ponderados, suman 100 % por columna
+Celdas con n sin ponderar < 30 marcadas con *
+Pie del cuadro: Chi-cuadrado de Rao-Scott
+
+
+```{r zona-nac7}
+# --- A1: zona × nac (7) ---
+resultado_A1 <- tabla_bivariada(
+  data       = encuesta_clean,
+  var_fila   = "zona",
+  var_col    = "nac",
+  etiq_fila  = etiquetas_zona,
+  etiq_col   = etiquetas_nac,
+  orden_fila = orden_zona,
+  orden_col  = orden_nac7
+)
+
+cat("\n=== Zona de residencia × Nac (7) ===\n")
+print(resultado_A1$tabla_pct)
+cat("\n", resultado_A1$pie, "\n")
+```
+
+
+# 2.c Zona (4 cat) x Region (3)
+```{r zona-region3}
+# --- A2: zona × origen_region (3) ---
+resultado_A2 <- tabla_bivariada(
+  data       = encuesta_clean,
+  var_fila   = "zona",
+  var_col    = "origen_region",
+  etiq_fila  = etiquetas_zona,
+  etiq_col   = etiquetas_region,
+  orden_fila = orden_zona,
+  orden_col  = orden_region
+)
+
+cat("\n=== Zona de residencia × Región (3) ===\n")
+print(resultado_A2$tabla_pct)
+cat("\n", resultado_A2$pie, "\n")
+```
+
+
+# Género × Nacionalidad
+Para los cruces bivariados con género se usa encuesta_genero (excluye "Otro género").
+Los 7 casos de "Otro género" se reportan por separado al final.
+
+
+## 2.d: género (2 cat) × nac (7)
+```{r genero-nac7}
+# --- B1: género × nac (7) ---
+resultado_B1 <- tabla_bivariada(
+  data       = encuesta_genero,          # subconjunto sin "Otro género"
+  var_fila   = "genero_agrupado",
+  var_col    = "nac",
+  etiq_col   = etiquetas_nac,
+  orden_fila = orden_genero,
+  orden_col  = orden_nac7
+)
+
+cat("\n=== Género × Nac (7) — excl. Otro género ===\n")
+print(resultado_B1$tabla_pct)
+cat("\n", resultado_B1$pie, "\n")
+```
+
+## 2.e género (2 cat) × Región (3 cat) 
+```{r genero-region3}
+# --- B2: género × origen_region (3) ---
+encuesta_genero <- encuesta_clean %>%
+  filter(genero_agrupado %in% c("Varón", "Mujer"))
+resultado_B2 <- tabla_bivariada(
+  data       = encuesta_genero,
+  var_fila   = "genero_agrupado",
+  var_col    = "origen_region",
+  etiq_col   = etiquetas_region,
+  orden_fila = orden_genero,
+  orden_col  = orden_region
+)
+
+cat("\n=== Género × Región (3) — excl. Otro género ===\n")
+print(resultado_B2$tabla_pct)
+cat("\n", resultado_B2$pie, "\n")
+```
+
+## 2.f Tabla de distribución de "Otro género" por Nac
+```{r otro-genero-nac}
+# --- B3: nota descriptiva — distribución "Otro género" por nac ---
+# n = 7; solo descriptivo, sin test estadístico.
+encuesta_clean %>%
+  filter(genero_agrupado == "Otro género", !is.na(nac)) %>%
+  mutate(nac = recode(nac, !!!etiquetas_nac)) %>%
+  group_by(nac) %>%
+  summarise(
+    N             = n(),
+    `% ponderado` = round(
+      sum(weightvec) /
+        sum(encuesta_clean$weightvec[
+          encuesta_clean$genero_agrupado == "Otro género" &
+            !is.na(encuesta_clean$nac)
+        ]) * 100, 1)
+  ) %>%
+  arrange(desc(N)) %>%
+  select(Nacionalidad = nac, N, `% ponderado`)
+```
+> **Nota:** Los 7 casos con género "Otro" se presentan solo con fines descriptivos dado el bajo n. No se incluyen en los cruces bivariados anteriores ni en el test estadístico.
+
+# Educación 
+
+## 2.g Educación ENMA (3 cat) x Nac (7 Categorías)
+
+```{r educ3-nac7}
+# --- C1: educ ENMA (3) × nac (7) ---
+resultado_C1 <- tabla_bivariada(
+  data         = encuesta_clean,
+  var_fila     = "q7_estudios_grupo2",
+  var_col      = "nac",
+  etiq_fila    = etiquetas_educ3,
+  etiq_col     = etiquetas_nac,
+  orden_fila   = orden_educ3,
+  orden_col    = orden_nac7,
+  excluir_fila = "Prefiero no responder"
+)
+
+cat("\n=== Educación ENMA (3 cat) × Nac (7) ===\n")
+print(resultado_C1$tabla_pct)
+cat("\n", resultado_C1$pie, "\n")
+```
+
+## 2.h — Educación ENMA (3 cat) x Region (3 cat)
+
+```{r educ3-region3}
+# --- C2: educ ENMA (3) × origen_region (3) ---
+resultado_C2 <- tabla_bivariada(
+  data         = encuesta_clean,
+  var_fila     = "q7_estudios_grupo2",
+  var_col      = "origen_region",
+  etiq_fila    = etiquetas_educ3,
+  etiq_col     = etiquetas_region,
+  orden_fila   = orden_educ3,
+  orden_col    = orden_region,
+  excluir_fila = "Prefiero no responder"
+)
+
+cat("\n=== Educación ENMA (3 cat) × Región (3) ===\n")
+print(resultado_C2$tabla_pct)
+cat("\n", resultado_C2$pie, "\n")
+```
+
+## 2.i — Educación sin agrupar (11 cat) x Nac (7 cat)
+
+```{r educ12-nac7}
+# --- C3: q7_estudios (11) × nac (7) ---
+resultado_C3 <- tabla_bivariada(
+  data         = encuesta_clean,
+  var_fila     = "q7_estudios",
+  var_col      = "nac",
+  etiq_fila    = etiquetas_educ12,
+  etiq_col     = etiquetas_nac,
+  orden_fila   = orden_educ12,
+  orden_col    = orden_nac7,
+  excluir_fila = "prefiero_no_responder"   # valor original sin etiquetar aún
+)
+
+cat("\n=== Educación sin agrupar (11 cat) × Nac (7) ===\n")
+print(resultado_C3$tabla_pct)
+cat("\n", resultado_C3$pie, "\n")
+```
+## 2.j — Educación sin agrupar (11 cat) x Region (3 cat)
+
+```{r educ12-region3}
+# --- C4: q7_estudios (11) × origen_region (3) ---
+resultado_C4 <- tabla_bivariada(
+  data         = encuesta_clean,
+  var_fila     = "q7_estudios",
+  var_col      = "origen_region",
+  etiq_fila    = etiquetas_educ12,
+  etiq_col     = etiquetas_region,
+  orden_fila   = orden_educ12,
+  orden_col    = orden_region,
+  excluir_fila = "prefiero_no_responder"
+)
+
+cat("\n=== Educación sin agrupar (11 cat) × Región (3) ===\n")
+print(resultado_C4$tabla_pct)
+cat("\n", resultado_C4$pie, "\n")
+```
+
+
+## 2.k Educación agrupada (5 cat nac) x Nac (7)  ---
+```{r nac-educ5-nac7}
+
+resultado_D1 <- tabla_bivariada(
+  data      = encuesta_clean,
+  var_fila  = "q7_estudios_grupo",
+  var_col   = "nac",
+  etiq_col  = etiquetas_nac,
+  orden_fila = orden_educ5,
+  orden_col  = orden_nac7
+)
+
+cat("\n=== Educación agrupada (5 cat) × Nac (7) ===\n")
+print(resultado_D1$tabla_pct)
+cat("\n", resultado_C1$pie, "\n")
+```
+
+
+## 2.l Educación agrupada (5 cat) x Región (3 cat) ---
+```{r region-educ5}
+resultado_D2 <- tabla_bivariada(
+  data      = encuesta_clean,
+  var_fila  = "q7_estudios_grupo",
+  var_col   = "origen_region",
+  etiq_col  = etiquetas_region,
+  orden_fila = orden_educ5,
+  orden_col  = orden_region
+)
+
+cat("\n=== Educación agrupada (5 cat) × Región (3) ===\n")
+print(resultado_D2$tabla_pct)
+cat("\n", resultado_D2$pie, "\n")
+```
+
+
+```{r exportar sección}
+# EXPORTACIÓN A EXCEL
+dir.create("Archivos_excel", showWarnings = FALSE)
+
+wb_1_2 <- createWorkbook()
+
+# A — Zona
+exportar_hoja(wb_1_2, "Zona x Nac7",       resultado_A1)
+exportar_hoja(wb_1_2, "Zona x Region3",    resultado_A2)
+
+# B — Género
+exportar_hoja(wb_1_2, "Genero x Nac7",     resultado_B1)
+exportar_hoja(wb_1_2, "Genero x Region3",  resultado_B2)
+
+# C — Educación ENMA (3 cat)
+exportar_hoja(wb_1_2, "Educ3 x Nac7",      resultado_C1)
+exportar_hoja(wb_1_2, "Educ3 x Region3",   resultado_C2)
+
+# C — Educación sin agrupar (11 cat)
+exportar_hoja(wb_1_2, "Educ11 x Nac7",     resultado_C3)
+exportar_hoja(wb_1_2, "Educ11 x Region3",  resultado_C4)
+
+# D — Educación Agrupada (5 cat)
+exportar_hoja(wb_1_2, "Educ5 x Nac7",     resultado_D1)
+exportar_hoja(wb_1_2, "Educ5 x Region3",  resultado_D2)
+
+saveWorkbook(wb_1_2, "Archivos_excel/02_nac_x_zona_genero_educ.xlsx",
+             overwrite = TRUE)
+cat("Excel exportado: Archivos_excel/02_nac_x_zona_genero_educ.xlsx\n")
+```
+
+# 2.m Pirámide poblacional — Género × Edad por lustros
+
+```{r piramide-genero-edad, fig.width=8, fig.height=7}
+# ============================================================
+# Pirámide poblacional — Género × Edad por lustros
+# Solo Varón y Mujer (excluye "Otro género", n = 7)
+# Datos ponderados
+# ============================================================
+
+piramide_data <- encuesta_clean %>%
+  filter(
+    genero_agrupado %in% c("Varón", "Mujer"),
+    !is.na(edad),
+    edad >= 18
+  ) %>%
+  mutate(
+    edad_lustro = case_when(
+      edad >= 18 & edad <= 24 ~ "18-24",
+      edad >= 25 & edad <= 29 ~ "25-29",
+      edad >= 30 & edad <= 34 ~ "30-34",
+      edad >= 35 & edad <= 39 ~ "35-39",
+      edad >= 40 & edad <= 44 ~ "40-44",
+      edad >= 45 & edad <= 49 ~ "45-49",
+      edad >= 50 & edad <= 54 ~ "50-54",
+      edad >= 55 & edad <= 59 ~ "55-59",
+      edad >= 60 & edad <= 64 ~ "60-64",
+      edad >= 65 & edad <= 69 ~ "65-69",
+      edad >= 70              ~ "70 o más",
+      TRUE                    ~ NA_character_
+    ),
+    edad_lustro = factor(edad_lustro, levels = c(
+      "18-24", "25-29", "30-34", "35-39", "40-44",
+      "45-49", "50-54", "55-59", "60-64", "65-69", "70 o más"
+    ))
+  ) %>%
+  filter(!is.na(edad_lustro)) %>%
+  group_by(genero_agrupado, edad_lustro) %>%
+  summarise(n_pond = sum(weightvec), .groups = "drop") %>%
+  group_by(genero_agrupado) %>%
+  mutate(pct = n_pond / sum(n_pond) * 100) %>%
+  ungroup() %>%
+  mutate(
+    pct_plot = if_else(genero_agrupado == "Varón", -pct, pct)
+  )
+
+lim_x <- ceiling(max(abs(piramide_data$pct_plot)) / 5) * 5
+
+ggplot(piramide_data,
+       aes(x    = edad_lustro,
+           y    = pct_plot,
+           fill = genero_agrupado)) +
+  geom_col(width = 0.75) +
+  # Etiquetas de % al extremo de cada barra
+  geom_text(
+    aes(label = paste0(round(abs(pct_plot), 1), "%"),
+        y     = pct_plot + if_else(genero_agrupado == "Varón", -0.4, 0.4)),
+    hjust = if_else(piramide_data$genero_agrupado == "Varón", 1.05, -0.05),
+    size  = 3,
+    color = "grey20"
+  ) +
+  # Línea central
+  geom_hline(yintercept = 0, color = "white", linewidth = 0.8) +
+  scale_y_continuous(
+    limits = c(-(lim_x + 8), lim_x + 8),
+    breaks = seq(-lim_x, lim_x, by = 5),
+    labels = function(x) paste0(abs(x), "%")
+  ) +
+  scale_fill_manual(
+    values = c("Varón" = "#C94F1A", "Mujer" = "#F5C242"),
+    name   = NULL
+  ) +
+  coord_flip() +
+  # Etiquetas de grupo etario centradas sobre el eje y (x=0)
+  annotate(
+    "text",
+    x     = levels(piramide_data$edad_lustro),
+    y     = 0,
+    label = levels(piramide_data$edad_lustro),
+    size  = 3.2,
+    color = "grey20",
+    fontface = "bold"
+  ) +
+  labs(
+    x       = NULL,
+    y       = "% de cada género (ponderado)",
+    caption = "Datos ponderados. Encuesta trayectorias sociolaborales AMBA.\nSe excluyen 7 casos con género 'Otro'."
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    legend.position    = "bottom",
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor   = element_blank(),
+    axis.text.y        = element_blank(),   # ocultar eje y original; las etiquetas van en annotate
+    plot.caption       = element_text(size = 8, color = "grey50")
+  )
+```
+
+# 2.m Tabla bivariada de edad x género
+```{r bivariada-edad-sexo}
+tabla_bivariada_edad_sexo = tabla_bivariada(data      = encuesta_genero,
+  var_fila  = "edad_agrupada",
+  var_col   = "genero_agrupado")
+
+cat("\n=== Edad agrupada ( cat) × Género (2 cat) ===\n")
+print(tabla_bivariada_edad_sexo$tabla_pct)
+cat("\n", tabla_bivariada_edad_sexo$pie, "\n")
+```
+
+
+
+
+# Parte 3: Dimensión familiar
+# Frecuencias y tablas univariadas de preguntas 8, 9 y 10
+## 3.a — Convivencia en pareja
+
+```{r q8}
+encuesta_clean %>%
+  filter(!is.na(q8_hogar_convivencia)) %>%
+  group_by(q8_hogar_convivencia) %>%
+  summarise(N = n(), `% ponderado` = round(sum(weightvec) / sum(encuesta_clean$weightvec[!is.na(encuesta_clean$q8_hogar_convivencia)]) * 100, 1)) %>%
+  mutate(q8_hogar_convivencia = recode(q8_hogar_convivencia,
+    "si_nacida_argentina"="Si, con persona nacida en Argentina",
+    "si_nacida_extranjero"="Si, con persona nacida en otro pais",
+    "sin_conyugue"="Sin conyuge o pareja",
+    "prefiero_no_responder"="Prefiero no responder"
+  )) %>%
+  arrange(desc(N)) %>%
+  select(Convivencia = q8_hogar_convivencia, N, `% ponderado`)
+```
+## 3.b — Hijos menores de 18
+
+```{r q9}
+encuesta_clean %>%
+  filter(!is.na(q9_hijos_menores)) %>%
+  group_by(q9_hijos_menores) %>%
+  summarise(N = n(), `% ponderado` = round(sum(weightvec) / sum(encuesta_clean$weightvec[!is.na(encuesta_clean$q9_hijos_menores)]) * 100, 1)) %>%
+  mutate(q9_hijos_menores = recode(q9_hijos_menores, "si"="Si","no"="No")) %>%
+  arrange(desc(N)) %>%
+  select(`Hijos menores de 18` = q9_hijos_menores, N, `% ponderado`)
+```
+
+## 3.c — Residencia de hijos menores
+
+Solo responden quienes tienen hijos menores (pregunta 9 = "si").
+
+```{r q10}
+df_con_hijos_menores <- encuesta_clean %>% 
+  filter(q9_hijos_menores == "si", !is.na(q10_hijos_menores_residencia))
+
+df_con_hijos_menores %>%
+  mutate(q10_hijos_menores_residencia = recode(q10_hijos_menores_residencia,
+    "argentina" = "En Argentina",
+    "otro_pais" = "En otro pais",
+    "ambos"     = "En Argentina y en otro pais"
+  )) %>% 
+  group_by(q10_hijos_menores_residencia) %>%
+  summarise(
+    N            = n(),
+    `% ponderado` = round(sum(weightvec) / sum(df_con_hijos_menores$weightvec) * 100, 1)
+  ) %>%
+  arrange(desc(N)) %>%
+  select(`Residencia de hijos menores` = q10_hijos_menores_residencia, N, `% ponderado`)
+```
+# Bivariados Q8 y Q10
+## 3.d Nacionalidad por convivencia en pareja
+
+```{r convivencia-nac}
+etiquetas_q8 <- c(
+  "si_nacida_argentina"   = "Sí, nacida en Argentina",
+  "si_nacida_extranjero"  = "Sí, nacida en otro país",
+  "sin_conyugue"  = "Sin cónyuge"
+)
+orden_q8 <- c(
+  "si_nacida_argentina"   = "Sí, nacida en Argentina",
+  "si_nacida_extranjero"  = "Sí, nacida en otro país",
+  "sin_conyugue"  = "Sin cónyuge"
+)
+
+tabla_convivencia_pareja <- tabla_bivariada(
+  data      = encuesta_clean,
+  var_fila  = "q8_hogar_convivencia",
+  var_col   = "nac",
+  etiq_fila = etiquetas_q8,
+  etiq_col  = etiquetas_nac,
+  orden_col  = orden_nac7,
+  orden_fila = orden_q8
+)
+
+cat("\n=== Convivencia en pareja (3 cat) × Nac (7) ===\n")
+print(tabla_convivencia_pareja$tabla_pct)
+cat("\n", tabla_convivencia_pareja$pie, "\n")
+```
+
+## 3.e Nacionalidad según tenencia de hijos menores de 18
+```{r hijos-menores-nac}
+etiquetas_q10= c("argentina" = "Hijos menores en Argentina",
+                 "ambos" = "Hijos menores en Argentina y otro país",
+                 "otro_pais"="Hijos menores en otro país")
+orden_q10= c("argentina" = "Hijos menores en Argentina",
+                 "ambos" = "Hijos menores en Argentina y otro país",
+                 "otro_pais"="Hijos menores en otro país")
+
+tabla_hijos_menores_nac = tabla_bivariada(data      = df_con_hijos_menores,
+  var_fila  = "q10_hijos_menores_residencia",
+  var_col   = "nac",
+  etiq_fila = etiquetas_q10,
+  etiq_col  = etiquetas_nac,
+  orden_col  = orden_nac7,
+  orden_fila = orden_q10) 
+cat("\n=== Hijos menores (3 cat) × Nac (7 cat) ===\n")
+print(tabla_hijos_menores_nac$tabla_pct)
+cat("\n", tabla_hijos_menores_nac$pie, "\n")
+  
+
+```
+# 3.f Zona según tenencia de hijos menores de 18 años
+```{r hijos-menores-zona}
+
+tabla_hijos_menores_zona = tabla_bivariada(data      = df_con_hijos_menores,
+  var_fila  = "q10_hijos_menores_residencia",
+  var_col   = "zona",
+  etiq_fila = etiquetas_q10,
+  etiq_col  = etiquetas_zona,
+  orden_col  = orden_zona,
+  orden_fila = orden_q10) 
+
+cat("\n=== Hijos menores  × Zona (4) ===\n")
+print(tabla_hijos_menores_zona$tabla_pct)
+cat("\n", tabla_hijos_menores_zona$pie, "\n")
+
+```
+```{r}
+wb_q10 <- createWorkbook()
+exportar_hoja(wb_q10, "Nacionalidad por convivencia",        tabla_convivencia_pareja)
+exportar_hoja(wb_q10, "Nacionalidad e hijos menores",        tabla_hijos_menores_nac)
+exportar_hoja(wb_q10, "Zona e hijos menores",        tabla_hijos_menores_zona)
+
+saveWorkbook(wb_q10, "Archivos_excel/03_convivencia_q8_hijos_menores_q10.xlsx", overwrite = TRUE)
+cat("\nExcel exportado: Archivos_excel/03_convivencia_q8_hijos_menores_q10.xlsx\n")
+```
+
+
+
+# Sección 4 - Pregunta 11 - Motivos de salida
+Notas: 
+
+La variable fue recodificada para simplificar el análisis:
+
+- La variable original es selección múltiple (6 columnas
+- Se construye motivo_principal con lógica jerárquica excluyente  según las definiciones de la investigación:
+
+- A. Migración de niño/a     <- migracion_familiar
+- B. Reagrupamiento familia  <- reagrupación
+- C. Violencia o persecución <- violencias
+- D. Trabajo / ingresos      <- trabajo
+- E. Estudio / experiencias  <- estudio
+- F. Otro                    <- otro (sin las anteriores)
+
+- Hay dos casos de NA, que no seleccionaron ningún motivo ni ampliaron en "otro".
+
+
+```{r q11-recodificacion}
+## Ajustamos el nombre de la variable "reagrupación" que llevaba tilde. 
+## Observación, configurar R Studio para procesar el código con "UTF-8"
+library(janitor)
+names(encuesta_clean) <- iconv(names(encuesta_clean), 
+                                from = "UTF-8", 
+                                to   = "ASCII//TRANSLIT")
+encuesta_clean <- encuesta_clean %>%
+  mutate(
+    motivo_principal = case_when(
+      `q11_motivos_salida/migracion_familiar` == 1 ~ "Migración de niño/a",
+      `q11_motivos_salida/reagrupacion`       == 1 ~ "Reagrupamiento familiar",
+      `q11_motivos_salida/violencias`         == 1 ~ "Violencia o persecución",
+      `q11_motivos_salida/trabajo`            == 1 ~ "Trabajo / mejorar ingresos",
+      `q11_motivos_salida/estudio`            == 1 ~ "Estudio / nuevas experiencias",
+      `q11_motivos_salida/otro`               == 1 ~ "Otro",
+      TRUE ~ NA_character_
+    ),
+    motivo_principal = factor(motivo_principal,
+      levels = c(
+        "Migración de niño/a",
+        "Reagrupamiento familiar",
+        "Violencia o persecución",
+        "Trabajo / mejorar ingresos",
+        "Estudio / nuevas experiencias",
+        "Otro"
+      )) 
+)
+encuesta_genero <- encuesta_clean %>% 
+  filter(genero_agrupado %in% c("Varón", "Mujer"))
+#Actualizamos encuesta genero
+```
+
+
+```{r q11-cruces-etiquetas-ordenes}
+# ============================================================
+# Q11 — CRUCES DE MOTIVO_PRINCIPAL × VARIABLES DE CRUCE
+# var_fila  = motivo_principal  (variable dependiente / filas)
+# var_col   = cada variable de cruce (columnas, suma 100% por columna)
+# ============================================================
+
+orden_motivos <- c(
+  "Migración de niño/a",
+  "Reagrupamiento familiar",
+  "Violencia o persecución",
+  "Trabajo / mejorar ingresos",
+  "Estudio / nuevas experiencias",
+  "Otro"
+)
+etiquetas_nac <- c(
+  "bolivia"   = "Bolivia",   "colombia"  = "Colombia",
+  "paraguay"  = "Paraguay",  "perú"       = "Perú",
+  "uruguay"   = "Uruguay",   "venezuela" = "Venezuela",
+  "otros"     = "Otros"
+)
+orden_nac7 <- c("Bolivia", "Colombia", "Paraguay", "Perú",
+                "Uruguay", "Venezuela", "Otros")
+
+
+etiquetas_zona <- c(
+  "zona_caba"  = "CABA",
+  "zona_norte" = "Zona Norte",
+  "zona_oeste" = "Zona Oeste",
+  "zona_sur"   = "Zona Sur"
+)
+orden_zona <- c("CABA", "Zona Norte", "Zona Oeste", "Zona Sur")
+
+etiquetas_genero <- c("Varón" = "Varón", "Mujer" = "Mujer")
+orden_genero <- c("Varón", "Mujer")
+
+etiquetas_edad1 <- c("18-34" = "18-34", "35-54" = "35-54", "55 o más" = "55 o más")
+orden_edad1 <- c("18-34", "35-54", "55 o más")
+
+etiquetas_edad2 <- c(
+  "18-24" = "18-24", "25-35" = "25-35", "36-55" = "36-55",
+  "56-64" = "56-64", "65-100" = "65 o más"
+)
+orden_edad2 <- c("18-24", "25-35", "36-55", "56-64", "65 o más")
+
+etiquetas_educ <- c(
+  "Hasta secundario incompleto"            = "Hasta sec. incompleto",
+  "Secundario completo"                    = "Secundario completo",
+  "Superior o universitario completo y mas"= "Superior/univ. completo y más",
+  "Prefiero no responder"                  = "Prefiero no responder"
+)
+orden_educ2 <- c(
+  "Hasta sec. incompleto",
+  "Secundario completo",
+  "Superior/univ. completo y más"
+)
+
+etiquetas_tiempo <- c(
+  "Hasta 5 años" = "Hasta 5 años",
+  "5 a 9 años"   = "5 a 9 años",
+  "10 años o más" = "10 años o más"
+)
+orden_tiempo <- c("Hasta 5 años", "5 a 9 años", "10 años o más")
+
+etiquetas_periodo <- c(
+  "Antes de 1989" = "Antes de 1989",
+  "1989-2002"     = "1989-2002",
+  "2003-2015"     = "2003-2015",
+  "2016-2025"     = "2016-2025"
+)
+orden_periodo <- c("Antes de 1989","1989-2002","2003-2015","2016-2025")
+
+etiquetas_decada <- c(
+  "Antes de 1990" = "Antes de 1990", "1990-1999" = "1990-1999",
+  "2000-2009"     = "2000-2009",     "2010-2019" = "2010-2019",
+  "2020-2025"     = "2020-2025"
+)
+orden_decada <- c("Antes de 1990","1990-1999","2000-2009","2010-2019","2020-2025")
+
+etiquetas_reciente <- c(
+  "Migración reciente"     = "Migración reciente",
+  "Migración no reciente"  = "Migración no reciente"
+)
+orden_reciente <- c("Migración reciente", "Migración no reciente")
+
+etiquetas_doc <- c("Con DNI" = "Con DNI", "Sin DNI" = "Sin DNI")
+orden_doc    <- c("Con DNI", "Sin DNI")
+
+etiquetas_region <- c(
+  "MERCOSUR"                   = "MERCOSUR",
+  "Extra MERCOSUR europeos"    = "Extra MERCOSUR europeos",
+  "Extra MERCOSUR no europeos" = "Extra MERCOSUR no europeos"
+)
+orden_region <- c("MERCOSUR","Extra MERCOSUR europeos","Extra MERCOSUR no europeos")
+
+# =============================================================
+# GENERACIÓN DE RESULTADOS
+# =============================================================
+```
+
+## 4.a Motivos de salida por Nacionalidad (7 Categorías)
+
+```{r q11-cruces}
+# --- Nacionalidad 7 categorías ---
+res_q11_nac7 <- tabla_bivariada(
+  data = encuesta_clean %>% filter(!is.na(motivo_principal)), var_fila = "motivo_principal", var_col = "nac",
+  etiq_col = etiquetas_nac, orden_fila = orden_motivos, orden_col = orden_nac7
+)
+cat("\n=== Motivo principal × Nacionalidad (7 cat.) ===\n")
+print(res_q11_nac7$tabla_pct); cat(res_q11_nac7$pie, "\n")
+```
+
+## 4.b Motivos de salida por Nacionalidad (16 Categorías)
+
+```{r q11-cruces4.b}
+# --- Nacionalidad 16 categorías ---
+
+res_q11_nac16 <- tabla_bivariada(
+  data = encuesta_clean, var_fila = "motivo_principal", var_col = "nacionalidad",
+  etiq_col = etiquetas_nac16, orden_fila = orden_motivos, orden_col = c("Bolivia", "Brasil", "Chile", "China", "Colombia","Ecuador","España", "Haití", "Italia", "Paraguay","Perú","Rep. Dominicana","Senegal","Uruguay","Venezuela","Otro")
+)
+cat("\n=== Motivo principal × Nacionalidad (16 cat.) ===\n")
+print(res_q11_nac16$tabla_pct); cat(res_q11_nac16$pie, "\n")
+```
+
+## 4.c Motivos de salida por Origen Región (3 Categorías)
+
+```{r q11-cruces4.c}
+# --- Región de origen ---
+res_q11_region <- tabla_bivariada(
+  data = encuesta_clean, var_fila = "motivo_principal", var_col = "origen_region",
+  etiq_col = etiquetas_region, orden_fila = orden_motivos, orden_col = orden_region
+)
+cat("\n=== Motivo principal × Región ===\n")
+print(res_q11_region$tabla_pct); cat(res_q11_region$pie, "\n")
+```
+
+## 4.d Motivos de salida por Zona de Residencia (4 Categorías)
+
+```{r q11-cruces4.d}
+# --- Zona de residencia ---
+res_q11_zona <- tabla_bivariada(
+  data = encuesta_clean, var_fila = "motivo_principal", var_col = "zona",
+  etiq_col = etiquetas_zona, orden_fila = orden_motivos, orden_col = orden_zona
+)
+cat("\n=== Motivo principal × Zona ===\n")
+print(res_q11_zona$tabla_pct); cat(res_q11_zona$pie, "\n")
+```
+
+## 4.e Motivos de salida por Género (2 Categorías, excluyendo "otros")
+
+```{r q11-cruces4.e}
+# --- Género (excluye "Otro género") ---
+res_q11_genero <- tabla_bivariada(
+  data = encuesta_genero,   # subconjunto sin "Otro género"
+  var_fila = "motivo_principal", var_col = "genero_agrupado",
+  etiq_col = etiquetas_genero, orden_fila = orden_motivos, orden_col = orden_genero
+)
+cat("\n=== Motivo principal × Género (excl. Otro género, n=7) ===\n")
+print(res_q11_genero$tabla_pct); cat(res_q11_genero$pie, "\n")
+```
+
+## 4.f Motivos de salida por edad agrupada 1 (3 Categorías)
+
+```{r q11-cruces4.f}
+# --- Edad agrupada 1 (3 grupos) ---
+res_q11_edad1 <- tabla_bivariada(
+  data = encuesta_clean, var_fila = "motivo_principal", var_col = "edad_agrupada_v1",
+  etiq_col = etiquetas_edad1, orden_fila = orden_motivos, orden_col = orden_edad1
+)
+cat("\n=== Motivo principal × Edad agrupada 1 ===\n")
+print(res_q11_edad1$tabla_pct); cat(res_q11_edad1$pie, "\n")
+```
+
+## 4.g Motivos de salida por edad agrupada 2 (5 Categorías)
+
+```{r q11-cruces4.g}
+# --- Edad agrupada 2 (5 grupos del perfil muestra) ---
+res_q11_edad2 <- tabla_bivariada(
+  data = encuesta_clean, var_fila = "motivo_principal", var_col = "edad_agrupada",
+  etiq_col = etiquetas_edad2, orden_fila = orden_motivos, orden_col = orden_edad2
+)
+cat("\n=== Motivo principal × Edad agrupada 2 ===\n")
+print(res_q11_edad2$tabla_pct); cat(res_q11_edad2$pie, "\n")
+```
+
+## 4.h Motivos de salida por Nivel Educativo Agrupado -ENMA (3 Categorías)
+
+```{r q11-cruces4.h}
+# --- Nivel educativo agrupado 2 (excluye "Prefiero no responder") ---
+res_q11_educ <- tabla_bivariada(
+  data = encuesta_clean, var_fila = "motivo_principal", var_col = "q7_estudios_grupo2",
+  etiq_col = etiquetas_educ, orden_fila = orden_motivos, orden_col = orden_educ2,
+  excluir_col = "Prefiero no responder"
+)
+cat("\n=== Motivo principal × Nivel educativo agrupado ===\n")
+print(res_q11_educ$tabla_pct); cat(res_q11_educ$pie, "\n")
+```
+
+## 4.i Motivos de salida por tiempo de residencia (3 Categorías)
+- Hasta 5 años
+- Entre 5 y 9 años
+- Más de 10 años
+
+
+```{r q11-cruces4.i}
+# --- Tiempo de residencia ---
+res_q11_tiempo <- tabla_bivariada(
+  data = encuesta_clean, var_fila = "motivo_principal", var_col = "tiempo_residencia",
+  etiq_col = etiquetas_tiempo, orden_fila = orden_motivos, orden_col = orden_tiempo
+)
+cat("\n=== Motivo principal × Tiempo de residencia ===\n")
+print(res_q11_tiempo$tabla_pct); cat(res_q11_tiempo$pie, "\n")
+```
+
+## 4.j Motivos de salida por año de arribo a Argentina (4 Categorías)
+- antes de 1989
+- 1989-2002 
+- 2003-2015 
+- 2016-2025 
+
+```{r q11-cruces4.j}
+# --- Año de llegada — períodos ---
+res_q11_periodo <- tabla_bivariada(
+  data = encuesta_clean, var_fila = "motivo_principal", var_col = "anio_arribo_periodo",
+  etiq_col = etiquetas_periodo, orden_fila = orden_motivos, orden_col = orden_periodo
+)
+cat("\n=== Motivo principal × Período de llegada ===\n")
+print(res_q11_periodo$tabla_pct); cat(res_q11_periodo$pie, "\n")
+```
+
+## 4.k Motivos de salida por década de llegada a Argentina (5 Categorías)
+- antes de 1990
+- 1990-1999
+- 2000-2009
+- 2010-2019
+- 2020-2025
+
+```{r q11-cruces4.k}
+# --- Año de llegada — décadas ---
+res_q11_decada <- tabla_bivariada(
+  data = encuesta_clean, var_fila = "motivo_principal", var_col = "anio_arribo_decada",
+  etiq_col = etiquetas_decada, orden_fila = orden_motivos, orden_col = orden_decada
+)
+cat("\n=== Motivo principal × Década de llegada ===\n")
+print(res_q11_decada$tabla_pct); cat(res_q11_decada$pie, "\n")
+```
+
+## 4.l Motivos de salida por Migración reciente (2 Categorías)
+- Migración reciente = q19 Año arribo >= 2023
+- Migración No reciente = q19 Año arribo < 2023
+
+```{r q11-cruces4.l}
+# --- Migración reciente ---
+res_q11_reciente <- tabla_bivariada(
+  data = encuesta_clean, var_fila = "motivo_principal", var_col = "migracion_reciente",
+  etiq_col = etiquetas_reciente, orden_fila = orden_motivos, orden_col = orden_reciente
+)
+cat("\n=== Motivo principal × Migración reciente ===\n")
+print(res_q11_reciente$tabla_pct); cat(res_q11_reciente$pie, "\n")
+```
+## 4.m Motivos de salida por Situación documentaria agrupada (2 Categorías)
+- Descipción de la categorización: 
+- Con DNI incluye:
+- Residencia permanente 
+- Naturalizado/a
+- Residencia temporaria
+
+- Sin DNI incluye:
+- Precaria vigente
+- Sin DNI
+- Otra
+- Precaria vencida
+
+
+
+```{r q11-cruces4.m}
+# --- Situación documentaria agrupada ---
+res_q11_doc <- tabla_bivariada(
+  data = encuesta_clean, var_fila = "motivo_principal", var_col = "sit_doc_agrupado",
+  etiq_col = etiquetas_doc, orden_fila = orden_motivos, orden_col = orden_doc
+)
+cat("\n=== Motivo principal × Situación documentaria ===\n")
+print(res_q11_doc$tabla_pct); cat(res_q11_doc$pie, "\n")
+```
+
+
+```{r q11-cruces4-exportar-a-excel}
+# =============================================================
+# EXPORTAR A EXCEL
+# =============================================================
+dir.create("Archivos_excel", showWarnings = FALSE)
+
+wb_q11 <- createWorkbook()
+exportar_hoja(wb_q11, "Motivo x Nac 7 cat",        res_q11_nac7)
+exportar_hoja(wb_q11, "Motivo x Nac 16 cat",       res_q11_nac16)
+exportar_hoja(wb_q11, "Motivo x Region",            res_q11_region)
+exportar_hoja(wb_q11, "Motivo x Zona",              res_q11_zona)
+exportar_hoja(wb_q11, "Motivo x Genero",            res_q11_genero)
+exportar_hoja(wb_q11, "Motivo x Edad 1",            res_q11_edad1)
+exportar_hoja(wb_q11, "Motivo x Edad 2",            res_q11_edad2)
+exportar_hoja(wb_q11, "Motivo x Educacion",         res_q11_educ)
+exportar_hoja(wb_q11, "Motivo x Tiempo residencia", res_q11_tiempo)
+exportar_hoja(wb_q11, "Motivo x Periodo llegada",   res_q11_periodo)
+exportar_hoja(wb_q11, "Motivo x Decada llegada",    res_q11_decada)
+exportar_hoja(wb_q11, "Motivo x Mig reciente",      res_q11_reciente)
+exportar_hoja(wb_q11, "Motivo x Doc agrupada",      res_q11_doc)
+
+saveWorkbook(wb_q11, "Archivos_excel/04_motivos_q11.xlsx", overwrite = TRUE)
+cat("\nExcel exportado: Archivos_excel/04_motivos_q11.xlsx\n")
 ```
