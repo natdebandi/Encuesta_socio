@@ -1,0 +1,382 @@
+```{r}
+library(tidyverse)
+library(readr)
+library(paletteer)
+library(treemapify)
+library(ggplot2)
+library(ggthemes)
+library(survey)
+library(openxlsx)
+```
+
+
+
+```{r}
+
+
+# ============================================================
+# CONSTRUCCIÓN DE ESTADOS COMPUESTOS POR MOMENTO (8 categorías)
+# Situación laboral + Ocupación + Formalidad → 1 estado por momento
+# ============================================================
+
+# --- NOTA METODOLÓGICA ---
+# Se excluyen del sequence analysis los casos con q19_anio_arribo >= 2024
+# (migración reciente, < 1 año en el país al momento de la encuesta),
+# ya que el cuestionario no les aplica el bloque Momento 2 (primer año)
+# por diseño del filtro (ver Survey_design_KOBO). Se utiliza el subconjunto
+# encuesta_momento2 (N = nrow(encuesta_momento2)), que ya realiza este filtro.
+# Los casos excluidos se reportan aparte como nota metodológica del paper.
+
+n_excluidos_reciente <- encuesta_clean %>%
+  filter(q19_anio_arribo >= 2024) %>%
+  nrow()
+
+cat("Casos excluidos del sequence analysis (migración reciente, sin Momento 2): ",
+    n_excluidos_reciente, "\n")
+
+# --- Niveles del alfabeto (mismo orden en los 3 momentos, para consistencia) ---
+niveles_estado <- c(
+  "Formal",
+  "Informal",
+  "Changas/subempleo",
+  "Sin remuneración",
+  "No trabaja - busca empleo",
+  "No trabaja - estudia",
+  "No trabaja - niño/adolescente",
+  "No trabaja - jubilado"
+)
+
+encuesta_momento2 <- encuesta_clean %>%
+  filter(q19_anio_arribo < 2024)
+
+encuesta_secuencias <- encuesta_momento2 %>%
+  mutate(
+
+    # ---------- MOMENTO 1: ORIGEN (Q13, Q14, Q15) ----------
+    estado_origen = case_when(
+      q13_trabajo_origen == "no_desempleado" ~ "No trabaja - busca empleo",
+      q13_trabajo_origen == "no_estudio"     ~ "No trabaja - estudia",
+      q13_trabajo_origen == "no_ninio"       ~ "No trabaja - niño/adolescente",
+      q13_trabajo_origen == "no_jubilado"    ~ "No trabaja - jubilado",
+      q13_trabajo_origen == "si" &
+        q14_situacion_ocupacional_orig == "changas"                  ~ "Changas/subempleo",
+      q13_trabajo_origen == "si" &
+        q14_situacion_ocupacional_orig == "trabajo_sin_remuneracion" ~ "Sin remuneración",
+      q13_trabajo_origen == "si" &
+        q14_situacion_ocupacional_orig %in% c("salario_fijo","cuenta_propia") &
+        q15_formalidad_trabajo == "formal"                           ~ "Formal",
+      q13_trabajo_origen == "si" &
+        q14_situacion_ocupacional_orig %in% c("salario_fijo","cuenta_propia") &
+        q15_formalidad_trabajo == "informal"                         ~ "Informal",
+      TRUE ~ NA_character_   # incluye q14 == "otro" -> revisar aparte
+    ),
+    estado_origen = factor(estado_origen, levels = niveles_estado),
+
+    # ---------- MOMENTO 2: PRIMER AÑO (Q21, Q22, Q23) ----------
+    estado_primer_anio = case_when(
+      q21_trabajo_primer_anio == "no_desempleado" ~ "No trabaja - busca empleo",
+      q21_trabajo_primer_anio == "no_estudio"     ~ "No trabaja - estudia",
+      q21_trabajo_primer_anio == "no_ninio"       ~ "No trabaja - niño/adolescente",
+      q21_trabajo_primer_anio == "no_jubilado"    ~ "No trabaja - jubilado",
+      q21_trabajo_primer_anio == "si" &
+        q22_ocupacion_primer_anio == "changas"                  ~ "Changas/subempleo",
+      q21_trabajo_primer_anio == "si" &
+        q22_ocupacion_primer_anio == "trabajo_sin_remuneracion" ~ "Sin remuneración",
+      q21_trabajo_primer_anio == "si" &
+        q22_ocupacion_primer_anio %in% c("salario_fijo","cuenta_propia") &
+        q23_formalidad_trabajo == "formal"                      ~ "Formal",
+      q21_trabajo_primer_anio == "si" &
+        q22_ocupacion_primer_anio %in% c("salario_fijo","cuenta_propia") &
+        q23_formalidad_trabajo == "informal"                    ~ "Informal",
+      TRUE ~ NA_character_   # incluye q22 == "otro" -> revisar aparte
+    ),
+    estado_primer_anio = factor(estado_primer_anio, levels = niveles_estado),
+
+    # ---------- MOMENTO 3: ACTUALIDAD (Q33, Q35, Q36) ----------
+    # Nota: Q33 no tiene opción "niño/adolescente" -> ese estado no aparece acá.
+    estado_actual = case_when(
+      q33_trabajo_actualidad == "no_desempleado" ~ "No trabaja - busca empleo",
+      q33_trabajo_actualidad == "no_estudio"     ~ "No trabaja - estudia",
+      q33_trabajo_actualidad == "no_jubilado"    ~ "No trabaja - jubilado",
+      q33_trabajo_actualidad == "si" &
+        q35_ocupacion_actual_ingreso == "changas"                  ~ "Changas/subempleo",
+      q33_trabajo_actualidad == "si" &
+        q35_ocupacion_actual_ingreso == "trabajo_sin_remuneracion" ~ "Sin remuneración",
+      q33_trabajo_actualidad == "si" &
+        q35_ocupacion_actual_ingreso %in% c("salario_fijo","cuenta_propia") &
+        q36_formalidad_trabajo == "formal"                         ~ "Formal",
+      q33_trabajo_actualidad == "si" &
+        q35_ocupacion_actual_ingreso %in% c("salario_fijo","cuenta_propia") &
+        q36_formalidad_trabajo == "informal"                       ~ "Informal",
+      TRUE ~ NA_character_   # incluye q35 == "otro" -> revisar aparte
+    ),
+    estado_actual = factor(estado_actual, levels = niveles_estado)
+  )
+
+# ============================================================
+# CHEQUEO DE CALIDAD ANTES DE SEGUIR
+# ============================================================
+
+# 1) Frecuencias por estado y momento (para detectar estados con muy pocos casos)
+frecuencias_estados <- bind_rows(
+  encuesta_secuencias %>% count(estado = estado_origen)      %>% mutate(momento = "Origen"),
+  encuesta_secuencias %>% count(estado = estado_primer_anio) %>% mutate(momento = "Primer año"),
+  encuesta_secuencias %>% count(estado = estado_actual)      %>% mutate(momento = "Actualidad")
+) %>%
+  pivot_wider(names_from = momento, values_from = n, values_fill = 0) %>%
+  select(estado, Origen, `Primer año`, Actualidad)
+
+print(frecuencias_estados)
+
+# 2) Casos NA por momento (incluye "otro" de q14/q22/q35 + missing genuino)
+cat("\nNA en estado_origen: ",      sum(is.na(encuesta_secuencias$estado_origen)),
+    "\nNA en estado_primer_anio: ", sum(is.na(encuesta_secuencias$estado_primer_anio)),
+    "\nNA en estado_actual: ",      sum(is.na(encuesta_secuencias$estado_actual)), "\n")
+
+# 3) Detalle de los "otro" para revisión manual
+casos_otro_revisar <- encuesta_secuencias %>%
+  filter(q14_situacion_ocupacional_orig == "otro" |
+         q22_ocupacion_primer_anio == "otro" |
+         q35_ocupacion_actual_ingreso == "otro") %>%
+  select(q14_situacion_ocupacional_orig, q14_otra_ocupacion_origen,
+         q22_ocupacion_primer_anio, q22_otra_ocupacion_primer_anio,
+         q35_ocupacion_actual_ingreso, Especifique_otra_fuente_de_ingresos)
+# (ajustar nombres de columnas de texto libre "otro" según aparezcan en el csv real)
+
+nrow(casos_otro_revisar)
+```
+
+
+```{r}
+# ============================================================
+# VERSIÓN EXPLORATORIA — 7 ESTADOS
+# Fusiona "Sin remuneración" + "Changas/subempleo"
+# Excluye "otro" y NA con nota metodológica (no imputación en esta etapa)
+# ============================================================
+
+# Descarga de paquetes por si hace falta
+#install.packages("TraMineR")
+#install.packages("WeightedCluster")
+
+library(TraMineR)
+library(WeightedCluster)
+
+niveles_estado7 <- c(
+  "Formal",
+  "Informal",
+  "Changas/subempleo/sin remuneración",
+  "No trabaja - busca empleo",
+  "No trabaja - estudia",
+  "No trabaja - niño/adolescente",
+  "No trabaja - jubilado"
+)
+
+encuesta_secuencias7 <- encuesta_secuencias %>%
+  mutate(
+    across(
+      c(estado_origen, estado_primer_anio, estado_actual),
+      ~ fct_collapse(
+          as.character(.x),
+          "Changas/subempleo/sin remuneración" = c("Changas/subempleo", "Sin remuneración")
+        )
+    )
+  ) %>%
+  mutate(
+    estado_origen      = factor(estado_origen,      levels = niveles_estado7),
+    estado_primer_anio = factor(estado_primer_anio, levels = niveles_estado7),
+    estado_actual      = factor(estado_actual,      levels = niveles_estado7)
+  )
+
+# --- Casos completos (excluye "otro" + NA genuino en cualquier momento) ---
+n_total_momento2   <- nrow(encuesta_secuencias7)
+encuesta_seq_completa <- encuesta_secuencias7 %>%
+  filter(!is.na(estado_origen), !is.na(estado_primer_anio), !is.na(estado_actual))
+n_excluidos_na <- n_total_momento2 - nrow(encuesta_seq_completa)
+
+cat("N total (momento2):", n_total_momento2,
+    "\nN excluidos (otro/NA en algún momento):", n_excluidos_na,
+    "\nN final para sequence analysis:", nrow(encuesta_seq_completa),
+    "(", round(nrow(encuesta_seq_completa)/n_total_momento2*100,1), "% de la muestra )\n")
+
+# NOTA METODOLÓGICA (versión exploratoria):
+# Se excluyen los casos con respuesta "otro" en ocupación (q14/q22/q35) o con
+# datos faltantes en al menos uno de los tres momentos. Pendiente para versión
+# definitiva: reclasificar "otro" a partir del texto libre antes de excluir.
+```
+
+
+```{r}
+# ============================================================
+# OBJETO SECUENCIA (TraMineR)
+# ============================================================
+
+seq_data <- encuesta_seq_completa %>%
+  select(estado_origen, estado_primer_anio, estado_actual) %>%
+  as.data.frame()
+
+# Paleta de colores simple y legible
+colores_estado <- c(
+  "Formal"                              = "#2E7D32",  # verde
+  "Informal"                            = "#F5C242",  # amarillo
+  "Changas/subempleo/sin remuneración"  = "#C94F1A",  # naranja oscuro 
+  "No trabaja - busca empleo"           = "#B71C1C",  # rojo
+  "No trabaja - estudia"                = "#1565C0",  # azul
+  "No trabaja - niño/adolescente"       = "#9575CD",  # violeta
+  "No trabaja - jubilado"               = "#757575"   # gris
+)
+# --- 1) Objeto secuencia (con alphabet= corregido) ---
+seq_obj <- seqdef(
+  seq_data,
+  alphabet = niveles_estado7,
+  states   = niveles_estado7,
+  labels   = niveles_estado7,
+  cpal     = colores_estado[niveles_estado7],
+  weights  = encuesta_seq_completa$weightvec,
+  xtstep   = 1
+)
+
+# --- 2) Costos de sustitución + matriz de distancias ---
+costos_sustitucion <- seqsubm(seq_obj, method = "TRATE")
+dist_om <- seqdist(seq_obj, method = "OM", indel = 1, sm = costos_sustitucion)
+
+# --- 3) Clustering ponderado (recalcular siempre en la misma sesión que dist_om) ---
+cluster_ward <- wcKMedRange(
+  dist_om,
+  kvals   = 2:8,
+  weights = encuesta_seq_completa$weightvec
+)
+
+# --- Diagnóstico rápido: confirmar que sí se calcularon los stats ---
+str(cluster_ward, max.level = 1)
+is.null(cluster_ward$stats)   # debería dar FALSE
+
+# Si da FALSE, seguimos normal:
+print(cluster_ward$stats)
+
+# ============================================================
+# 4) GRÁFICOS
+# ============================================================
+
+# --- 4.a Distribución de estados por momento (corregida) ---
+png("Archivos_excel/distribucion_estados_momento_v2.png", width = 1400, height = 900, res = 130)
+par(mar = c(5, 5, 4, 2), xpd = TRUE)
+seqdplot(seq_obj, with.legend = TRUE, cex.legend = 0.75,
+         main = "Distribución de estados por momento")
+dev.off()
+
+# --- 4.b Trayectorias más frecuentes ---
+png("Archivos_excel/secuencias_frecuentes.png", width = 1400, height = 900, res = 130)
+seqfplot(seq_obj, with.legend = TRUE, cex.legend = 0.75,
+         main = "Trayectorias más frecuentes (ponderado)")
+dev.off()
+
+# --- 4.c Todas las secuencias individuales ---
+png("Archivos_excel/secuencias_individuales.png", width = 1400, height = 900, res = 130)
+seqIplot(seq_obj, sortv= "from.start", with.legend = TRUE, cex.legend = 0.75,
+         main = "Todas las trayectorias individuales")
+dev.off()
+
+# --- 4.d Calidad de clustering según k (ASW ponderado) ---
+png("Archivos_excel/calidad_clusters_ASWw.png", width = 1200, height = 800, res = 130)
+plot(cluster_ward, stat = "ASWw")
+dev.off()
+
+
+# --- 4.e  ---
+# --- Vector de agrupamiento alineado con seq_obj ---
+# (mismo subconjunto y mismo orden de filas que encuesta_seq_completa)
+
+# Chequeo rápido: ¿hay NA en nac dentro de este subconjunto?
+table(encuesta_seq_completa$nac, useNA = "ifany")
+
+# Etiquetas legibles (mismo criterio que ya usan en el resto del proyecto)
+etiquetas_nac <- c(
+  "bolivia"   = "Bolivia",
+  "colombia"  = "Colombia",
+  "paraguay"  = "Paraguay",
+  "perú"      = "Perú",
+  "uruguay"   = "Uruguay",
+  "venezuela" = "Venezuela",
+  "otros"     = "Otros"
+)
+
+grupo_nac <- recode(encuesta_seq_completa$nac, !!!etiquetas_nac)
+
+# --- Gráfico: distribución de estados por momento, separado por nacionalidad ---
+png("Archivos_excel/distribucion_estados_momento_nac.png",
+    width = 1800, height = 1600, res = 130)   # más grande: son 7 paneles
+par(mar = c(4, 4, 3, 1), xpd = TRUE)
+
+seqdplot(seq_obj, group = grupo_nac,
+         with.legend = TRUE,
+         cex.legend  = 1.6,    # tamaño del texto de la leyenda
+         cex.axis    = 1.1,    # tamaño de los números/ejes
+         cex.lab     = 1.2,    # tamaño de "Rel. Freq." y nombres de eje x
+         cex.main    = 1.2,    # tamaño del título de cada panel (con Nacionalidad)
+         main        = "Distribución de estados por momento × Nacionalidad")
+         xtlab       = c("Origen", "Primer año", "Actualidad")
+
+dev.off()
+```
+
+
+```{r}
+# Ver la estructura para confirmar el nombre exacto de columna
+str(cluster_ward$clustering)
+head(cluster_ward$clustering)
+
+# Elegimos k=5 según el ASWw que vimos antes
+encuesta_seq_completa$cluster_k5 <- cluster_ward$clustering$cluster5
+
+
+png("Archivos_excel/clusters_k5_seqdplot.png", width = 1800, height = 1400, res = 130)
+par(mar = c(5, 6, 4, 1), xpd = TRUE)
+seqdplot(seq_obj, group = encuesta_seq_completa$cluster_k5,
+         with.legend = TRUE, cex.legend = 1, cex.axis = 1, cex.lab = 1.1, cex.main = 1.1,
+         xtlab = c("Origen", "Primer año", "Actualidad"),
+         main = "Composición de cada cluster")
+dev.off()
+
+# Complementario: ver las secuencias individuales más representativas de cada cluster
+png("Archivos_excel/clusters_k5_seqIplot.png", width = 1800, height = 1400, res = 130)
+seqIplot(seq_obj, group = encuesta_seq_completa$cluster_k5,
+         with.legend = TRUE, cex.legend = 1,
+         xtlab = c("Origen", "Primer año", "Actualidad"),
+         main = "Trayectorias individuales por cluster")
+dev.off()
+
+# Tamaño de cada cluster (sin ponderar y ponderado)
+table(encuesta_seq_completa$cluster_k5)
+tapply(encuesta_seq_completa$weightvec, encuesta_seq_completa$cluster_k5, sum)
+```
+
+
+```{r}
+etiquetas_cluster_k5 <- c(
+  "16" = "Formales - 16",   # reemplazar con los nombres reales una vez que veas el gráfico
+  "301" = "Jubilados - 301",
+  "789" = "Informales - 789",
+  "943" = "Niños-Jovenes - 943",
+  "976" = "Precarizados-Desempleados- 976"
+)
+
+resultado_cluster_motivo <- tabla_bivariada(
+  data      = encuesta_seq_completa,
+  var_fila  = "cluster_k5",
+  var_col   = "motivo_principal",
+  etiq_fila = etiquetas_cluster_k5,
+  orden_col = orden_motivos
+)
+
+cat("\n=== Tipología de trayectoria (k=5) × Motivo principal de migración ===\n")
+print(resultado_cluster_motivo$tabla_pct)
+cat("\n", resultado_cluster_motivo$pie, "\n")
+
+
+clusters_x_motivo <- createWorkbook()
+exportar_hoja(clusters_x_motivo, "Clusters X Motivo",        resultado_cluster_motivo)
+
+saveWorkbook(clusters_x_motivo, "Archivos_excel/motivos_x_clusters.xlsx", overwrite = TRUE)
+
+```
+
